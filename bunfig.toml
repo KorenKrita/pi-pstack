@@ -1,0 +1,3 @@
+[test]
+# Keep vendored upstream tests (skills/**/scripts/*.test.ts) out of this repo's suite.
+root = "./tests"
