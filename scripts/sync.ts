@@ -3,7 +3,7 @@
 import { $ } from "bun";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { RULES, applyRules, normalizeSkillName } from "./rules";
+import { RULES, applyRules, isBinary, normalizeSkillName } from "./rules";
 
 export const UPSTREAM_REPO = "https://github.com/cursor/plugins";
 export const UPSTREAM_COMMIT = "fae2c6ed95821bd85f614a73e4842e13229fa5e5";
@@ -11,7 +11,6 @@ export const UPSTREAM_COMMIT = "fae2c6ed95821bd85f614a73e4842e13229fa5e5";
 const EXCLUDED_PSTACK_SKILLS = ["make-bot-ui"];
 const TEAM_KIT_SKILLS = ["deslop", "control-ui", "control-cli"];
 const OUTPUT_DIRS = ["skills", "agents"];
-const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|lockb)$/i;
 
 const root = join(import.meta.dir, "..");
 
@@ -23,17 +22,54 @@ async function resolveUpstream(): Promise<string> {
     return dir;
   }
   const cache = join(root, ".upstream-cache");
-  const head = existsSync(join(cache, ".git")) ? (await $`git -C ${cache} rev-parse HEAD`.nothrow().quiet().text()).trim() : "";
-  if (head !== UPSTREAM_COMMIT) {
+  if (!(await hasCommit(cache, UPSTREAM_COMMIT))) {
     rmSync(cache, { recursive: true, force: true });
     mkdirSync(cache, { recursive: true });
     await $`git -C ${cache} init -q`;
     await $`git -C ${cache} remote add origin ${UPSTREAM_REPO}`;
     await $`git -C ${cache} sparse-checkout set pstack cursor-team-kit`;
     await $`git -C ${cache} fetch -q --depth 1 --filter=blob:none origin ${UPSTREAM_COMMIT}`;
+    // Checkout batch-fetches the sparse blobs so the tree reads below stay local.
     await $`git -C ${cache} checkout -q FETCH_HEAD`;
   }
   return cache;
+}
+
+async function hasCommit(dir: string, commit: string): Promise<boolean> {
+  if (!existsSync(dir)) return false;
+  return (await $`git -C ${dir} cat-file -e ${commit + "^{commit}"}`.nothrow().quiet()).exitCode === 0;
+}
+
+export type UpstreamFile = { data: Buffer; mode: number };
+
+/**
+ * Output path (relative to repo root) -> file, read from the git tree at `commit`, never from the
+ * working tree, so a dirty or differently-checked-out upstream cannot change the output.
+ */
+export async function readUpstream(dir: string, commit: string = UPSTREAM_COMMIT): Promise<Map<string, UpstreamFile>> {
+  if (!(await hasCommit(dir, commit))) throw new Error(`${dir} is not a git checkout containing ${commit}`);
+  const paths = ["pstack/skills", "pstack/agents", ...TEAM_KIT_SKILLS.map((s) => `cursor-team-kit/skills/${s}`)];
+  const listing = await $`git -C ${dir} ls-tree -r -z ${commit} -- ${paths}`.quiet().text();
+  const out = new Map<string, UpstreamFile>();
+  for (const entry of listing.split("\0").filter(Boolean)) {
+    const [meta, path] = entry.split("\t") as [string, string];
+    const [mode, type, sha] = meta.split(" ") as [string, string, string];
+    if (type !== "blob" || (mode !== "100644" && mode !== "100755")) throw new Error(`unsupported entry ${mode} ${type} ${path}`);
+    const dest = outputPath(path);
+    if (!dest) continue;
+    const data = Buffer.from(await $`git -C ${dir} cat-file blob ${sha}`.quiet().arrayBuffer());
+    out.set(dest, { data, mode: mode === "100755" ? 0o755 : 0o644 });
+  }
+  return out;
+}
+
+function outputPath(path: string): string | null {
+  let m = path.match(/^pstack\/skills\/([^/]+)\/(.+)$/);
+  if (m) return EXCLUDED_PSTACK_SKILLS.includes(m[1]!) ? null : `skills/${m[1]}/${m[2]}`;
+  m = path.match(/^cursor-team-kit\/skills\/([^/]+)\/(.+)$/);
+  if (m) return `skills/${m[1]}/${m[2]}`;
+  m = path.match(/^pstack\/agents\/(.+)$/);
+  return m ? `agents/${m[1]}` : null;
 }
 
 function walk(dir: string): string[] {
@@ -41,22 +77,6 @@ function walk(dir: string): string[] {
     const p = join(dir, name);
     return statSync(p).isDirectory() ? walk(p) : [p];
   });
-}
-
-/** Map of output path (relative to repo root) -> upstream source path. */
-function plan(upstream: string): Map<string, string> {
-  const out = new Map<string, string>();
-  const add = (srcDir: string, destDir: string) => {
-    for (const f of walk(srcDir)) out.set(join(destDir, relative(srcDir, f)), f);
-  };
-  const pstackSkills = join(upstream, "pstack/skills");
-  for (const name of readdirSync(pstackSkills).sort()) {
-    if (EXCLUDED_PSTACK_SKILLS.includes(name)) continue;
-    add(join(pstackSkills, name), join("skills", name));
-  }
-  for (const name of TEAM_KIT_SKILLS) add(join(upstream, "cursor-team-kit/skills", name), join("skills", name));
-  add(join(upstream, "pstack/agents"), "agents");
-  return out;
 }
 
 function normalizeFrontmatterName(path: string, text: string, hits: Record<string, number>): string {
@@ -71,22 +91,21 @@ function normalizeFrontmatterName(path: string, text: string, hits: Record<strin
 
 async function main() {
   const upstream = await resolveUpstream();
-  const files = plan(upstream);
+  const files = await readUpstream(upstream);
   const hits: Record<string, number> = {};
   let written = 0;
 
-  for (const [dest, src] of files) {
+  for (const [dest, { data, mode }] of files) {
     const target = join(root, dest);
     mkdirSync(dirname(target), { recursive: true });
-    const raw = readFileSync(src);
-    const next = BINARY_EXT.test(src)
-      ? raw
-      : Buffer.from(normalizeFrontmatterName(dest, applyRules(dest, raw.toString("utf8"), RULES, hits), hits));
+    const next = isBinary(data)
+      ? data
+      : Buffer.from(normalizeFrontmatterName(dest, applyRules(dest, data.toString("utf8"), RULES, hits), hits));
     if (!existsSync(target) || !readFileSync(target).equals(next)) {
       writeFileSync(target, next);
       written++;
     }
-    chmodSync(target, statSync(src).mode & 0o777);
+    chmodSync(target, mode);
   }
 
   let removed = 0;

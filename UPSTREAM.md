@@ -8,7 +8,7 @@ bun run sync -- --upstream /path/to/cursor-plugins   # use a local checkout inst
 bun run check                         # validate generated output
 ```
 
-The sync is idempotent (a rerun produces no git diff) and deletes generated files that no longer map to an upstream file. It prints per-rule hit counts.
+Input is read from the git tree at the pinned commit (`git ls-tree` / `git cat-file`), never from the working tree, so a dirty checkout cannot change the output; a `--upstream` dir (or cache) that does not contain the pinned commit is rejected. The sync is idempotent (a rerun produces no git diff) and deletes generated files that no longer map to an upstream file. It prints per-rule hit counts.
 
 ## Pinned source
 
@@ -42,28 +42,29 @@ Applied in order to every vendored text file (binary files are copied verbatim).
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `rules-dir` | `~/.cursor/rules/` | `~/.pi/pstack/rules/` | all | 7 | `pstack-models.mdc` (written by `setup-pstack`, read by arena/interrogate/swarm) lives in a pstack-owned dir the extension loads. |
 | 2 | `recall-transcript-layout` | recall's sentence describing `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl` and its slug format | Pi layout `~/.pi/agent/sessions/<slug>/<timestamp>_<uuid>.jsonl`, slug `--Users-you-proj--`, Pi session JSONL entries | `skills/recall/SKILL.md` | 1 | Pi's slug is `--` + cwd without leading slash, `/\:` → `-`, + `--` (`session-manager.js`). |
-| 3 | `worktree-audit-comment` | `# Transcripts dir: ~/.cursor/projects/...` | Pi session dir comment | `worktree-audit.sh` | 1 | Keep the script's comment truthful. |
-| 4 | `worktree-audit-slug` | `slug=$(... sed 's#^/##; s#/#-#g')` | `slug="--$(... sed 's#^/##; s#[/:]#-#g')--"` | `worktree-audit.sh` | 1 | Compute Pi's slug. |
-| 5 | `worktree-audit-dir` | `transcripts="$HOME/.cursor/projects/$slug/agent-transcripts"` | `transcripts="$HOME/.pi/agent/sessions/$slug"` | `worktree-audit.sh` | 1 | The script `rg -l`s the worktree path across transcript files; Pi JSONL session files contain cwd/tool paths, so the match still works. |
+| 3 | `worktree-audit-session-dirs` | comment + `slug=` + `transcripts=` block | `session_dir()` helper computing `~/.pi/agent/sessions/--<path, / and : → ->--`, plus `main_sessions` | `worktree-audit.sh` | 1 | Pi keys sessions by the cwd pi was launched in (`session-manager.js`). |
+| 4 | `worktree-audit-scan` | the `if [ -d "$transcripts" ]` / `rg ... "$transcripts"` lines | scan both the main worktree's session dir and the candidate `$wt`'s own session dir | `worktree-audit.sh` | 1 | Chats launched inside a worktree live in that worktree's dir; chats launched in the main repo that operate on it live in the main dir. No global scan across unrelated projects. Covered by `tests/worktree-audit.test.ts`. |
+| 5a | `reflect-session-layout` | Cursor's three-layout `ls` + description | `ls -t <session-dir>/*.jsonl`; nested dirs are subagent runs | `skills/reflect/SKILL.md` | 1 | Pi stores one JSONL per session at the top of the session dir. |
+| 5b | `reflect-first-user-message` | "read the first JSONL line and check `message.content[0].text`" | skip the `type: "session"` header and events; first `type: "message"` with `role: "user"`; content is a string or parts array; `jq` one-liner | `skills/reflect/SKILL.md` | 1 | Pi's first line is session metadata, not a message. |
 | 6 | `transcripts-dir-phrase` | ``the (active )?workspace's `agent-transcripts/` directory`` | ``… Pi session directory `~/.pi/agent/sessions/<slug>/` `` | all | 5 | Same concept; the extension must name this path in the system prompt (see built-ins). |
 | 7 | `transcripts-dir-bare` | ``under `agent-transcripts/` `` | ``under the Pi session directory `~/.pi/agent/sessions/<slug>/` `` | all | 1 | orchestrate.md. |
-| 8 | `transcripts-placeholder` | `<agent-transcripts>` | `<session-dir>` | all | 3 | Shell placeholder in reflect. Note reflect still globs `*/subagents/*.jsonl`; that matches Cursor's nesting and simply finds nothing in Pi until the extension decides where subagent sessions go. |
+| 8 | `transcripts-placeholder` | `<agent-transcripts>` | `<session-dir>` | all | 0 | Fallback; reflect's only uses are rewritten by 5a. |
 | 9 | `projects-dir` | `~/.cursor/projects/` | `~/.pi/agent/sessions/` | all | 5 | "Do not glob across `~/.pi/agent/sessions/*/`" keeps the same privacy guard. |
-| 10 | `user-skills-dir` | `~/.cursor/skills/` | `~/.pi/agent/skills/` | all | 5 | Pi user-level skill dir. |
+| 10 | `user-skills-dir` | `~/.cursor/skills/` or `$HOME/.cursor/skills/` | `~/.pi/agent/skills/` (same prefix) | all | 5 | Pi user-level skill dir. |
 | 11 | `plugin-paths-phrase` | ``plugin-installed paths under `~/.cursor/plugins/` `` | ``package-installed paths under `~/.pi/agent/git/` `` | all | 3 | Pi checks out `pi install git:...` packages there. |
 | 12 | `plugins-dir` | `~/.cursor/plugins/` | `~/.pi/agent/git/` | all | 0 | Fallback for drift. |
 | 13 | `subagents-dir` | `~/.cursor/subagents/` | `~/.pi/pstack/subagents/` | all | 0 | Not present at the pinned commit; guards drift. |
-| 14 | `workspace-skills-dir` | `.cursor/skills/` (not preceded by a path/word char) | `.pi/skills/` | all | 11 | Project skills, incl. `create-verification-skill`'s `verify-<app>` output and automate-me's mode skills. Runs after the `~/` rules so user-level paths are already gone. |
+| 14 | `workspace-skills-dir` | `.cursor/skills/` bare or after `./`, `../`, `<dir>/` (not after a word char, so `foo.cursor/` is untouched) | `.pi/skills/` | all | 11 | Project skills, incl. `create-verification-skill`'s `verify-<app>` output and automate-me's mode skills. Runs after the `~/` rules so user-level paths are already gone. |
 | 15 | `home-cursor-fallback` | `~/.cursor/` or `$HOME/.cursor/` | `~/.pi/pstack/` / `$HOME/.pi/pstack/` | all | 0 | Anything left is pstack-owned state. |
 | – | `frontmatter-name` | SKILL.md `name:` not a valid Pi name | normalized (`Poteto Mode` → `poteto-mode`) | `SKILL.md` | 1 | Pi requires `[a-z0-9-]`, ≤64, equal to the dir name. Other keys (`disable-model-invocation`, `mode`, `reminder`, `icon`, `color`, `paths`) are untouched for the extension. Agent files keep their display names (`Comment Sicko`), since skills route by that `subagent_type`. |
 
-`bun run check` fails on any remaining `~/.cursor`, `$HOME/.cursor`, or bare `.cursor/` path unless allowlisted in `CURSOR_ALLOWLIST` (`scripts/rules.ts`):
+`bun run check` scans every non-binary generated file (binary = contains a NUL byte) with URLs masked out, and fails on any remaining `~/.cursor`, `$HOME/.cursor`, or `.cursor/` path segment (bare, `./`, `../`, `<dir>/`) unless allowlisted in `CURSOR_ALLOWLIST` (`scripts/rules.ts`):
 
 | File | Text | Reason |
 | --- | --- | --- |
 | `skills/poteto-mode/playbooks/worktree-cleanup.md` | `.cursor/worktrees/myrepo/x` | Example of a worktree outside the hand-typed guess; the lesson (read `git worktree list`) is tool-independent. |
 
-It also validates skill names/descriptions and that every `the **x** skill`, `**principle-x**`, `the **x** principle`, and `/x` reference resolves to a vendored skill or to `EXTERNAL_SKILLS` (`create-skill`, `babysit`, `loop`, `goal`).
+It also validates skill names/descriptions and that every skill reference resolves — `The/the **x** skill`, bold lists (`**a** and **b** principle skills`), `**principle-x**`, `Use **x** for/whenever/when/to`, and `/x` slash commands (bare, backticked, parenthesised, or quoted; `/tmp` is ignored) — to a vendored skill or to `EXTERNAL_SKILLS` (`create-skill`, `babysit`, `loop`, `goal`).
 
 ### Residual Cursor references kept on purpose
 

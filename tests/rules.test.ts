@@ -26,8 +26,6 @@ describe("applyRules", () => {
       "`~/.cursor/rules/pstack-models.mdc`",
       "under `agent-transcripts/`",
       "ls <agent-transcripts>/*.jsonl",
-      'transcripts="$HOME/.cursor/projects/$slug/agent-transcripts"',
-      "slug=$(printf '%s' \"$main_wt\" | sed 's#^/##; s#/#-#g')",
       "plugin-installed paths under `~/.cursor/plugins/`",
       "`.cursor/skills/x`",
     ].join("\n");
@@ -44,8 +42,7 @@ describe("applyRules", () => {
 
   test("file-scoped rules only apply to matching paths", () => {
     const text = 'transcripts="$HOME/.cursor/projects/$slug/agent-transcripts"';
-    expect(applyRules("skills/poteto-mode/scripts/worktree-audit.sh", text)).toBe('transcripts="$HOME/.pi/agent/sessions/$slug"');
-    // Elsewhere only the generic fallback fires, keeping `$HOME` intact.
+    // Outside worktree-audit.sh only the generic fallback fires, keeping `$HOME` intact.
     expect(applyRules("skills/other/x.sh", text)).toBe('transcripts="$HOME/.pi/pstack/projects/$slug/agent-transcripts"');
   });
 
@@ -72,5 +69,14 @@ describe("skill names", () => {
   test("validates Pi rules", () => {
     for (const ok of ["poteto-mode", "a", "principle-x-1"]) expect(isValidSkillName(ok)).toBe(true);
     for (const bad of ["Poteto Mode", "-a", "a-", "a--b", "", "a_b", "x".repeat(65)]) expect(isValidSkillName(bad)).toBe(false);
+  });
+});
+
+describe("review regressions", () => {
+  test("relative workspace skill paths are rewritten and pass the checker", async () => {
+    const { findCursorPaths } = await import("../scripts/check");
+    const out = applyRules("skills/a/SKILL.md", "`./.cursor/skills/verify-app/SKILL.md` `../.cursor/skills/x/` `$HOME/.cursor/skills/y/`");
+    expect(out).toBe("`./.pi/skills/verify-app/SKILL.md` `../.pi/skills/x/` `$HOME/.pi/agent/skills/y/`");
+    expect(findCursorPaths("skills/a/SKILL.md", out)).toEqual([]);
   });
 });

@@ -1,16 +1,17 @@
 // Validate the generated skills/ and agents/ trees. Exit 1 on any finding.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { CURSOR_ALLOWLIST, EXTERNAL_SKILLS, isValidSkillName } from "./rules";
+import { CURSOR_ALLOWLIST, EXTERNAL_SKILLS, isBinary, isValidSkillName, stripUrls } from "./rules";
 
 export type Finding = { file: string; message: string };
 
-const TEXT_EXT = /\.(md|mdc|ts|mjs|js|json|sh|tsv|yaml|yml|txt)$|\/[^./]+$/;
-
-/** Paths starting with `~/.cursor` or `$HOME/.cursor`, or a bare `.cursor/` not preceded by a word/path char. */
+/**
+ * Local Cursor paths outside URLs: `~/.cursor`, `$HOME/.cursor`, and any `.cursor/` segment
+ * (bare, `./`, `../`, `<dir>/`). `foo.cursor/` and `endCursor` are not paths.
+ */
 export function findCursorPaths(file: string, text: string): Finding[] {
   const out: Finding[] = [];
-  for (const m of text.matchAll(/(?:~|\$HOME)\/\.cursor\b[^\s`'")]*|(?<![\w/.~-])\.cursor\/[^\s`'")]*/g)) {
+  for (const m of stripUrls(text).matchAll(/(?:~|\$HOME)\/\.cursor\b[^\s`'")]*|(?<![\w-])\.cursor\/[^\s`'")]*/g)) {
     const hit = m[0];
     const allowed = CURSOR_ALLOWLIST.some((a) => a.file === file && hit.startsWith(a.text));
     if (!allowed) out.push({ file, message: `cursor path: ${hit}` });
@@ -40,24 +41,38 @@ export function checkSkillFrontmatter(file: string, dirName: string, text: strin
   return out;
 }
 
-/** Skill references in prose: `the **x** skill`, `**principle-x**`, `**x** principle`, `/x` slash refs. */
+const BOLD = String.raw`\*\*([a-z0-9-]+)\*\*`;
+const JOIN = String.raw`(?:,\s*(?:and\s+|or\s+)?|\s+(?:and|or)\s+)`;
+// `**a**, **b** and **c** principle skills`, `The **x** skill`, `the **y** principle`.
+const BOLD_NC = String.raw`\*\*[a-z0-9-]+\*\*`;
+const BOLD_LIST = new RegExp(`${BOLD}((?:${JOIN}${BOLD_NC})*)\\s+(principle\\s+skills?|principles?|skills?)\\b`, "g");
+
+/**
+ * Skill references in prose: bold names (or bold lists) followed by skill/principle, any
+ * `**principle-x**`, `Use **x** for|whenever|when|to`, and `/x` slash commands (bare, backticked,
+ * parenthesised, or quoted; `/x/...` paths are not commands).
+ */
 export function findSkillRefs(text: string): string[] {
   const refs = new Set<string>();
-  for (const m of text.matchAll(/the \*\*([a-z0-9-]+)\*\* skill/g)) refs.add(m[1]!);
-  for (const m of text.matchAll(/\*\*([a-z0-9-]+)\*\* principle/g)) refs.add(`principle-${m[1]!}`);
+  for (const m of text.matchAll(BOLD_LIST)) {
+    const names = [m[1]!, ...[...m[2]!.matchAll(new RegExp(BOLD, "g"))].map((x) => x[1]!)];
+    const principle = m[3]!.startsWith("principle");
+    for (const n of names) refs.add(principle && !n.startsWith("principle-") ? `principle-${n}` : n);
+  }
   for (const m of text.matchAll(/\*\*(principle-[a-z0-9-]+)\*\*/g)) refs.add(m[1]!);
-  for (const m of text.matchAll(/(?<=^|[\s(`])\/([a-z][a-z0-9-]+)(?=[\s`),.:;]|$)/gm)) refs.add(m[1]!);
+  for (const m of text.matchAll(/\b[Uu]se \*\*([a-z0-9-]+)\*\* (?:for|whenever|when|to)\b/g)) refs.add(m[1]!);
+  for (const m of text.matchAll(/(?<=^|[\s(`"'])\/([a-z][a-z0-9-]+)(?=[\s`"'),.:;]|$)/gm)) refs.add(m[1]!);
   return [...refs];
 }
 
+// Slash tokens that are filesystem paths, not skills (e.g. "keep the harness in `/tmp`").
+const SLASH_NOISE = new Set(["tmp"]);
+
 export function checkSkillRefs(file: string, text: string, known: Set<string>): Finding[] {
-  return findSkillRefs(text)
+  return findSkillRefs(stripUrls(text))
     .filter((r) => !known.has(r) && !(r in EXTERNAL_SKILLS) && !SLASH_NOISE.has(r))
     .map((r) => ({ file, message: `unresolved skill reference: ${r}` }));
 }
-
-// Slash tokens that are paths, not skills (e.g. `/tmp/...`).
-const SLASH_NOISE = new Set(["tmp"]);
 
 function walk(dir: string): string[] {
   if (!existsSync(dir)) return [];
@@ -74,9 +89,9 @@ export function checkRepo(root: string): { findings: Finding[]; files: number; s
   const findings: Finding[] = [];
   for (const abs of files) {
     const file = relative(root, abs);
-    if (!TEXT_EXT.test(file)) continue;
-    const text = readFileSync(abs, "utf8");
-    findings.push(...findCursorPaths(file, text));
+    const data = readFileSync(abs);
+    if (isBinary(data)) continue;
+    findings.push(...findCursorPaths(file, data.toString("utf8")));
   }
   for (const abs of skillFiles) {
     const file = relative(root, abs);

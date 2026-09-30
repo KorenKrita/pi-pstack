@@ -19,12 +19,18 @@ Invoke when the user says "reflect" or "/reflect". Skip when the conversation is
 The parent finds its own transcript file before fanning out. The system prompt names the active workspace's Pi session directory `~/.pi/agent/sessions/<slug>/`. Use that path. Do not glob across `~/.pi/agent/sessions/*/`. That crosses workspace boundaries and reads private chats from unrelated projects.
 
 ```bash
-ls -t <session-dir>/*.jsonl <session-dir>/*/*.jsonl <session-dir>/*/subagents/*.jsonl 2>/dev/null | head -10
+ls -t <session-dir>/*.jsonl 2>/dev/null | head -10
 ```
 
-Three transcript layouts: legacy flat (`<id>.jsonl`), current nested (`<id>/<id>.jsonl`), and subagent (`<parent>/subagents/<child>.jsonl`).
+Pi keeps one file per session, `<session-dir>/<timestamp>_<uuid>.jsonl`. Anything nested deeper (for example `<timestamp>_<uuid>/.../session.jsonl`) is a subagent run, not the parent.
 
-For each candidate, read the first JSONL line and check that `message.content[0].text` contains the conversation's opening user prompt. Take the matching path. If no path resolves, write a tight digest of the session and pass that instead.
+For each candidate, skip the `type: "session"` header line and other non-message entries, take the first entry with `type: "message"` and `message.role: "user"`, and check that its text contains the conversation's opening user prompt. `message.content` is either a string or an array of parts; use the first `type: "text"` part:
+
+```bash
+jq -rn 'first(inputs | select(.type == "message" and .message.role == "user") | .message.content | if type == "string" then . else (map(select(.type == "text")) | .[0].text) end)' <file>
+```
+
+Take the matching path. If no path resolves, write a tight digest of the session and pass that instead.
 
 ### 2. Spawn three reviewers in parallel
 

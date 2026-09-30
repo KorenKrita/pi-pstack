@@ -31,26 +31,69 @@ export const RULES: Rule[] = [
       'Transcripts are Pi session files at `~/.pi/agent/sessions/<slug>/<timestamp>_<uuid>.jsonl`, where `<slug>` is the workspace path with the leading slash dropped, each "/" turned into "-", and the result wrapped in `--` (so `/Users/you/proj` becomes `--Users-you-proj--`). Every line is one Pi session entry (JSON): a header, messages, tool results, and other session events.',
   },
   {
-    id: "worktree-audit-comment",
-    description: "worktree-audit.sh: document Pi's session dir instead of Cursor's agent-transcripts.",
+    id: "worktree-audit-session-dirs",
+    description:
+      "worktree-audit.sh: Pi keys sessions by launch cwd, so define a per-path session dir helper instead of one Cursor transcripts dir.",
     files: "skills/poteto-mode/scripts/worktree-audit.sh",
-    find: "# Transcripts dir: ~/.cursor/projects/<slugified-repo-path>/agent-transcripts.",
-    replace:
-      "# Transcripts dir: Pi sessions at ~/.pi/agent/sessions/--<slugified-repo-path>--/*.jsonl (Pi session JSONL).",
+    find: [
+      "# Transcripts dir: ~/.cursor/projects/<slugified-repo-path>/agent-transcripts.",
+      "slug=$(printf '%s' \"$main_wt\" | sed 's#^/##; s#/#-#g')",
+      'transcripts="$HOME/.cursor/projects/$slug/agent-transcripts"',
+    ].join("\n"),
+    replace: [
+      "# Pi session JSONL lives under ~/.pi/agent/sessions/--<cwd, leading / dropped, / and : as ->--/,",
+      "# keyed by the cwd pi was launched in. A worktree's chats sit under the main worktree's dir",
+      "# (launched there, operating on the worktree) or under the worktree's own dir (launched inside it).",
+      "session_dir() { printf '%s/.pi/agent/sessions/--%s--' \"$HOME\" \"$(printf '%s' \"$1\" | sed 's#^/##; s#[/:]#-#g')\"; }",
+      'main_sessions=$(session_dir "$main_wt")',
+    ].join("\n"),
   },
   {
-    id: "worktree-audit-slug",
-    description: "worktree-audit.sh: compute Pi's `--path-with-dashes--` session slug.",
+    id: "worktree-audit-scan",
+    description: "worktree-audit.sh: scan the main worktree's and the candidate's own session dirs.",
     files: "skills/poteto-mode/scripts/worktree-audit.sh",
-    find: "slug=$(printf '%s' \"$main_wt\" | sed 's#^/##; s#/#-#g')",
-    replace: "slug=\"--$(printf '%s' \"$main_wt\" | sed 's#^/##; s#[/:]#-#g')--\"",
+    find: [
+      '\tif [ -d "$transcripts" ]; then',
+      '\t\tf=$(rg -l -e "${wt}/" -e "${wt}\\"" "$transcripts" 2>/dev/null \\',
+    ].join("\n"),
+    replace: [
+      '\tdirs=(); for d in "$main_sessions" "$(session_dir "$wt")"; do [ -d "$d" ] && dirs+=("$d"); done',
+      '\tif [ ${#dirs[@]} -gt 0 ]; then',
+      '\t\tf=$(rg -l -e "${wt}/" -e "${wt}\\"" "${dirs[@]}" 2>/dev/null \\',
+    ].join("\n"),
   },
   {
-    id: "worktree-audit-dir",
-    description: "worktree-audit.sh: point the transcripts dir at Pi's session dir.",
-    files: "skills/poteto-mode/scripts/worktree-audit.sh",
-    find: 'transcripts="$HOME/.cursor/projects/$slug/agent-transcripts"',
-    replace: 'transcripts="$HOME/.pi/agent/sessions/$slug"',
+    id: "reflect-session-layout",
+    description: "reflect: Pi keeps one JSONL file per session directly in the session dir.",
+    files: "skills/reflect/SKILL.md",
+    find: [
+      "ls -t <agent-transcripts>/*.jsonl <agent-transcripts>/*/*.jsonl <agent-transcripts>/*/subagents/*.jsonl 2>/dev/null | head -10",
+      "```",
+      "",
+      "Three transcript layouts: legacy flat (`<id>.jsonl`), current nested (`<id>/<id>.jsonl`), and subagent (`<parent>/subagents/<child>.jsonl`).",
+    ].join("\n"),
+    replace: [
+      "ls -t <session-dir>/*.jsonl 2>/dev/null | head -10",
+      "```",
+      "",
+      "Pi keeps one file per session, `<session-dir>/<timestamp>_<uuid>.jsonl`. Anything nested deeper (for example `<timestamp>_<uuid>/.../session.jsonl`) is a subagent run, not the parent.",
+    ].join("\n"),
+  },
+  {
+    id: "reflect-first-user-message",
+    description:
+      "reflect: Pi's first JSONL line is a `type: \"session\"` header; match the first user message, whose content is a string or a parts array.",
+    files: "skills/reflect/SKILL.md",
+    find: "For each candidate, read the first JSONL line and check that `message.content[0].text` contains the conversation's opening user prompt. Take the matching path.",
+    replace: [
+      "For each candidate, skip the `type: \"session\"` header line and other non-message entries, take the first entry with `type: \"message\"` and `message.role: \"user\"`, and check that its text contains the conversation's opening user prompt. `message.content` is either a string or an array of parts; use the first `type: \"text\"` part:",
+      "",
+      "```bash",
+      "jq -rn 'first(inputs | select(.type == \"message\" and .message.role == \"user\") | .message.content | if type == \"string\" then . else (map(select(.type == \"text\")) | .[0].text) end)' <file>",
+      "```",
+      "",
+      "Take the matching path.",
+    ].join("\n"),
   },
   {
     id: "transcripts-dir-phrase",
@@ -80,8 +123,8 @@ export const RULES: Rule[] = [
   {
     id: "user-skills-dir",
     description: "User-level skills ~/.cursor/skills/ -> ~/.pi/agent/skills/.",
-    find: "~/.cursor/skills/",
-    replace: "~/.pi/agent/skills/",
+    find: /(~|\$HOME)\/\.cursor\/skills\//g,
+    replace: "$1/.pi/agent/skills/",
   },
   {
     id: "plugin-paths-phrase",
@@ -105,7 +148,8 @@ export const RULES: Rule[] = [
     id: "workspace-skills-dir",
     description:
       "Project skills (incl. generated `verify-<app>`) .cursor/skills/ -> .pi/skills/ (Pi's project skill dir).",
-    find: /(?<![\w/.~-])\.cursor\/skills\//g,
+    // Any local path: bare, `./`, `../`, or `<dir>/`. `~/` and `$HOME/` forms were rewritten above.
+    find: /(?<![\w-])\.cursor\/skills\//g,
     replace: ".pi/skills/",
   },
   {
@@ -163,6 +207,16 @@ export function applyRules(
     hits[rule.id] = (hits[rule.id] ?? 0) + count;
   }
   return out;
+}
+
+/** Text with URLs blanked out, for checks that must ignore URLs. */
+export function stripUrls(text: string): string {
+  return text.replace(URL_RE, (u) => " ".repeat(u.length));
+}
+
+/** A file is binary if it contains a NUL byte. */
+export function isBinary(data: Uint8Array): boolean {
+  return data.includes(0);
 }
 
 function splitUrls(text: string): [string, boolean][] {
