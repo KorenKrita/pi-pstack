@@ -164,9 +164,12 @@ function taskSummary(meta: TaskMeta, home: string): string {
   ].join("\n");
 }
 
-/** Follow a task owned by another process through its stored meta until it settles or `signal` aborts. */
-async function pollUntilSettled(home: string, id: string, signal: AbortSignal | undefined): Promise<RunResult | undefined> {
-  while (!signal?.aborted) {
+/**
+ * Follow a task owned by another process through its stored meta until it settles, `deadline`
+ * (epoch ms) passes, or `signal` aborts. Resolves undefined when it gives up; never outlives that.
+ */
+async function pollUntilSettled(home: string, id: string, deadline: number, signal: AbortSignal | undefined): Promise<RunResult | undefined> {
+  while (!signal?.aborted && Date.now() < deadline) {
     const meta = readMeta(home, id);
     if (meta && meta.status !== "running" && meta.status !== "queued") {
       let output = "";
@@ -175,7 +178,7 @@ async function pollUntilSettled(home: string, id: string, signal: AbortSignal | 
       } catch {}
       return { meta, output, ok: meta.status === "done" };
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, Math.min(500, Math.max(0, deadline - Date.now()))));
   }
   return undefined;
 }
@@ -354,23 +357,32 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
           if (!meta) throw new Error(`Unknown task "${params.taskId}".`);
           const live = (m: TaskMeta) => m.status === "running" || m.status === "queued";
           // Tasks owned by another Pi process (e.g. a subagent's own children) are followed through the store.
+          const timeout = (params.timeoutSeconds ?? 600) * 1000;
           const pending =
             getRunner().wait(params.taskId) ??
-            (params.wait && live(meta) ? pollUntilSettled(home, params.taskId, signal) : undefined);
+            (params.wait && live(meta) ? pollUntilSettled(home, params.taskId, Date.now() + timeout, signal) : undefined);
           if (pending && params.wait) {
-            const timeout = (params.timeoutSeconds ?? 600) * 1000;
             let timer: ReturnType<typeof setTimeout> | undefined;
+            let onAbort: (() => void) | undefined;
             const outcome = await Promise.race([
               pending,
               new Promise<"timeout">((r) => (timer = setTimeout(() => r("timeout"), timeout))),
-              new Promise<"aborted">((r) => signal?.addEventListener("abort", () => r("aborted"), { once: true })),
-            ]);
-            clearTimeout(timer);
+              new Promise<"aborted">((r) => {
+                onAbort = () => r("aborted");
+                if (signal?.aborted) onAbort();
+                else signal?.addEventListener("abort", onAbort, { once: true });
+              }),
+            ]).finally(() => {
+              clearTimeout(timer);
+              if (onAbort) signal?.removeEventListener("abort", onAbort);
+            });
             if (outcome === "timeout" || outcome === "aborted" || outcome === undefined) {
               const now = readMeta(home, params.taskId)!;
-              return { content: [{ type: "text", text: `Still ${now.status} (${outcome}).\n${taskSummary(now, home)}` }], details: now };
+              return { content: [{ type: "text", text: `Still ${now.status} (${signal?.aborted ? "aborted" : "timeout"}).\n${taskSummary(now, home)}` }], details: now };
             }
-            return { content: [{ type: "text", text: resultText(outcome, home) }], details: outcome.meta, isError: !outcome.ok };
+            // Pi marks a tool result failed only when execute() throws.
+            if (!outcome.ok) throw new Error(resultText(outcome, home));
+            return { content: [{ type: "text", text: resultText(outcome, home) }], details: outcome.meta };
           }
           const now = readMeta(home, params.taskId)!;
           if (now.status === "running" || now.status === "queued") {
@@ -381,7 +393,8 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
             output = readFileSync(outputPath(home, now.id), "utf8");
           } catch {}
           const r: RunResult = { meta: now, output, ok: now.status === "done" };
-          return { content: [{ type: "text", text: resultText(r, home) }], details: now, isError: !r.ok };
+          if (!r.ok) throw new Error(resultText(r, home));
+          return { content: [{ type: "text", text: resultText(r, home) }], details: now };
         },
       });
     } else if (name === "TaskCancel") {
@@ -551,11 +564,13 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
   });
 
   // A subagent exits when the Pi that owns it dies (crash or SIGKILL skip session_shutdown).
+  // SIGTERM to itself runs Pi's own signal path, which kills detached bash process trees and
+  // disposes the session (session_shutdown → our cancelAll for grandchildren). Hard exit as a fallback.
   const ownerPid = Number(process.env.PSTACK_OWNER_PID);
   if (ownDepth() >= 1 && ownerPid > 0) {
     watchParent(ownerPid, () => {
-      if (runner) void runner.cancelAll(1000).finally(() => process.exit(130));
-      else process.exit(130);
+      setTimeout(() => process.exit(130), 8000).unref();
+      process.kill(process.pid, "SIGTERM");
     });
   }
 

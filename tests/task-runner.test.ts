@@ -323,6 +323,45 @@ describe("Task tool (T3–T8)", () => {
     expect(text(await waiting)).toBe("theirs");
   });
 
+  test("cross-process wait stops polling at its deadline and on an already-aborted signal", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    writeMeta(home, sampleMeta({ id: "tother", status: "running", ownerPid: process.ppid }));
+    // Count the poller's 500ms sleeps: after the call returns, none may be scheduled.
+    const realSetTimeout = globalThis.setTimeout;
+    let polls = 0;
+    (globalThis as any).setTimeout = (fn: any, ms?: number, ...rest: any[]) => {
+      if (ms !== undefined && ms > 0 && ms <= 500) polls++;
+      return realSetTimeout(fn, ms, ...rest);
+    };
+    try {
+      const t0 = Date.now();
+      expect(text(await h.call("TaskOutput", { taskId: "tother", wait: true, timeoutSeconds: 0.3 }))).toContain("Still running (timeout)");
+      expect(Date.now() - t0).toBeLessThan(2000);
+      const after = polls;
+      await Bun.sleep(1200);
+      expect(polls).toBe(after);
+      const ac = new AbortController();
+      ac.abort();
+      expect(text(await h.call("TaskOutput", { taskId: "tother", wait: true, timeoutSeconds: 30 }, ac.signal))).toContain("Still running (aborted)");
+      const afterAbort = polls;
+      await Bun.sleep(700);
+      expect(polls).toBe(afterAbort);
+    } finally {
+      (globalThis as any).setTimeout = realSetTimeout;
+    }
+  });
+
+  test("failed and cancelled results are tool errors (thrown), from TaskOutput poll and wait", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    const bg = taskIdOf(await h.call("Task", { description: "f", prompt: "fail", run_in_background: true }));
+    await expect(h.call("TaskOutput", { taskId: bg, wait: true })).rejects.toThrow(/exited with code 3/);
+    await expect(h.call("TaskOutput", { taskId: bg })).rejects.toThrow(/exited with code 3/);
+    writeMeta(home, sampleMeta({ id: "tcan", status: "cancelled", error: "cancelled" }));
+    await expect(h.call("TaskOutput", { taskId: "tcan" })).rejects.toThrow(/tcan cancelled/);
+  });
+
   test("review 7: a queued background task is reported as queued", async () => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ maxConcurrent: 1 }));
     const h = makeHost();
