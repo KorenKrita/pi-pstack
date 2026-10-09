@@ -39,6 +39,12 @@ pi_json 'Call the Task tool exactly once with description "fg" and prompt "Reply
 check "foreground Task result is the child's final text" \
 	"$ENDS | map(select(.toolName==\"Task\")) | length == 1 and (.[0].isError | not) and (.[0].result.content[0].text | test(\"PAPAYA-7\"))" "$F1"
 
+# 1b. A brief that starts like a CLI option reaches the child verbatim (prompt goes on stdin).
+F1B="$OUT/1b-dash-prompt.jsonl"
+pi_json 'Call the Task tool exactly once with description "dash" and prompt exactly "- Reply with exactly the word GUAVA-2 and nothing else." Then reply with the Task result only.' >"$F1B" 2>"$OUT/1b.err"
+check "dash-leading prompt is delivered, not parsed as an option" \
+	"$ENDS | map(select(.toolName==\"Task\")) | .[0] | (.isError | not) and (.result.content[0].text | test(\"GUAVA-2\"))" "$F1B"
+
 # 2. Background Task returns at once; TaskOutput wait gets the result.
 F2="$OUT/2-background.jsonl"
 pi_json 'Call the Task tool exactly once with description "bg", run_in_background true, and prompt "Reply with exactly the word MANGO-3 and nothing else." Then call TaskOutput with that taskId and wait true. Then reply DONE.' >"$F2" 2>"$OUT/2.err"

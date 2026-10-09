@@ -1,14 +1,16 @@
 #!/usr/bin/env bun
-// Fake `pi --mode json -p` for Task runtime tests. Behaviour comes from the prompt (last argument):
+// Fake `pi --mode json -p` for Task runtime tests. Behaviour comes from the prompt (stdin):
 //   "echo:<text>"  reply <text>          "args"   reply JSON {args, env}
 //   "sleep:<ms>"   wait, then reply done  "fail"   exit 3 with stderr
 //   "error"        assistant stopReason error   "empty"  no assistant text
+//   "ignore-term"  ignore SIGTERM and hang (shutdown escalation check)
 //   "remember"     reply with the count of prior runs in --session-dir (resume check)
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
-const prompt = args.at(-1) ?? "";
+// Like real `pi -p` with no message argument: the prompt arrives on stdin.
+const prompt = (await Bun.stdin.text()).trim();
 const sessionDir = args[args.indexOf("--session-dir") + 1]!;
 mkdirSync(sessionDir, { recursive: true });
 const log = join(sessionDir, "fake.log");
@@ -38,5 +40,9 @@ else if (prompt === "args") {
   process.exit(3);
 } else if (prompt === "error") reply("", "error", { errorMessage: "upstream 502" });
 else if (prompt === "empty") reply("");
-else if (prompt === "remember") reply(`prior=${prior.length} first=${prior[0] ?? ""}`);
+else if (prompt === "ignore-term") {
+  process.on("SIGTERM", () => {});
+  reply("stubborn");
+  await Bun.sleep(60_000);
+} else if (prompt === "remember") reply(`prior=${prior.length} first=${prior[0] ?? ""}`);
 else reply(`unknown fake prompt: ${prompt}`);

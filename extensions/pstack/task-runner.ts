@@ -66,8 +66,8 @@ export const BUILTIN_AGENT_TYPES: AgentType[] = [
   {
     name: "explore",
     description: "Read-only codebase exploration.",
-    prompt: "You are an exploration agent. Do not modify files; run only read-only shell commands.",
-    tools: [...READONLY_TOOLS, "bash"],
+    prompt: "You are an exploration agent. Do not modify files.",
+    tools: READONLY_TOOLS,
     readonly: true,
   },
   { name: "bash", description: "Shell-command agent.", prompt: "You are a shell agent. Use bash to do the work.", tools: ["bash", "read"] },
@@ -136,17 +136,15 @@ export function isAlive(pid: number | undefined): boolean {
   }
 }
 
-/** Mark queued/running tasks whose owning Pi process is gone as errors; kill their orphaned children. */
+/**
+ * Mark queued/running tasks whose owning Pi process is gone as errors. Persisted pids are never
+ * signalled (they may have been reused); orphaned children exit on their own (see watchParent).
+ */
 export function reconcileOrphans(home: string): TaskMeta[] {
   const fixed: TaskMeta[] = [];
   for (const meta of listTasks(home)) {
     if (meta.status !== "running" && meta.status !== "queued") continue;
     if (meta.ownerPid === process.pid || isAlive(meta.ownerPid)) continue;
-    if (isAlive(meta.pid)) {
-      try {
-        process.kill(meta.pid!, "SIGKILL");
-      } catch {}
-    }
     const next = { ...meta, status: "error" as const, error: "parent Pi exited before completion", endedAt: new Date().toISOString() };
     writeMeta(home, next);
     fixed.push(next);
@@ -183,8 +181,8 @@ export interface ChildLaunch {
   resume: boolean;
 }
 
-/** Arguments after the `pi` command. The prompt is the last argument. */
-export function buildChildArgs(home: string, meta: TaskMeta, agent: AgentType, prompt: string, launch: ChildLaunch): string[] {
+/** Arguments after the `pi` command. The prompt is sent on stdin, so it is never parsed as options or `@file`. */
+export function buildChildArgs(home: string, meta: TaskMeta, agent: AgentType, launch: ChildLaunch): string[] {
   const dir = taskDir(home, meta.id);
   const args = ["--mode", "json", "-p", "--session-dir", join(dir, "session")];
   if (launch.resume) args.push("-c");
@@ -194,10 +192,9 @@ export function buildChildArgs(home: string, meta: TaskMeta, agent: AgentType, p
     "--model", meta.model,
   );
   if (meta.thinking) args.push("--thinking", meta.thinking);
-  const tools = meta.readonly ? [...READONLY_TOOLS, ...(agent.tools?.includes("bash") ? ["bash"] : [])] : agent.tools;
+  const tools = meta.readonly ? READONLY_TOOLS : agent.tools;
   if (tools) args.push("--tools", [...tools, ...CHILD_PSTACK_TOOLS].join(","));
   args.push("--append-system-prompt", join(dir, "system.md"));
-  args.push(prompt);
   return args;
 }
 
@@ -209,6 +206,7 @@ export function childEnv(meta: TaskMeta, home: string, base: NodeJS.ProcessEnv =
     PSTACK_TASK_ID: meta.id,
     PSTACK_PARENT_TASK_ID: meta.parentTaskId ?? "",
     PSTACK_READONLY: meta.readonly ? "1" : "",
+    PSTACK_OWNER_PID: String(process.pid),
   };
 }
 
@@ -236,6 +234,21 @@ export function createWorktree(home: string, id: string, cwd: string): { path: s
   mkdirSync(join(home, "worktrees"), { recursive: true });
   execFileSync("git", ["-C", top, "worktree", "add", "-q", path, "-b", branch, "HEAD"], { stdio: ["ignore", "pipe", "pipe"] });
   return { path, branch };
+}
+
+/**
+ * In a subagent process: exit when the owning parent Pi is gone (crash, SIGKILL), so children never
+ * outlive the chat that started them. Polls every `intervalMs`; the timer does not keep Pi alive.
+ */
+export function watchParent(ownerPid: number, onGone: () => void, intervalMs = 2000): () => void {
+  const timer = setInterval(() => {
+    if (!isAlive(ownerPid)) {
+      clearInterval(timer);
+      onGone();
+    }
+  }, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 export interface RunResult {
@@ -295,8 +308,15 @@ export class TaskRunner {
     return true;
   }
 
-  cancelAll(): void {
-    for (const run of this.running.values()) run.cancel();
+  /** Cancel every child and wait (bounded) until each has exited and its meta is settled. */
+  async cancelAll(graceMs = 3000): Promise<void> {
+    const runs = [...this.running.values()];
+    for (const run of runs) run.cancel();
+    const all = Promise.all(runs.map((r) => r.done));
+    const timedOut = await Promise.race([all.then(() => false), new Promise<boolean>((r) => setTimeout(() => r(true), graceMs).unref())]);
+    if (!timedOut) return;
+    for (const run of this.running.values()) run.child?.kill("SIGKILL");
+    await Promise.race([all, new Promise((r) => setTimeout(r, 1000).unref())]);
   }
 
   start(meta: TaskMeta, agent: AgentType, prompt: string, resume: boolean, onProgress?: (p: Progress) => void): Promise<RunResult> {
@@ -369,10 +389,13 @@ export class TaskRunner {
 
     const run = () => {
       const [command, ...pre] = this.piCommand();
-      const args = [...pre, ...buildChildArgs(this.home, current, agent, prompt, { ...this.launch, resume })];
+      const args = [...pre, ...buildChildArgs(this.home, current, agent, { ...this.launch, resume })];
       this.active++;
       try {
-        child = spawn(command!, args, { cwd: current.cwd, env: childEnv(current, this.home), stdio: ["ignore", "pipe", "pipe"] });
+        child = spawn(command!, args, { cwd: current.cwd, env: childEnv(current, this.home), stdio: ["pipe", "pipe", "pipe"] });
+        entry.child = child;
+        child.stdin!.on("error", () => {});
+        child.stdin!.end(prompt);
       } catch (e) {
         child = undefined;
         this.active--;

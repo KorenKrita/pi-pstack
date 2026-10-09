@@ -37,6 +37,7 @@ import {
   outputPath,
   readMeta,
   reconcileOrphans,
+  watchParent,
   writeMeta,
   type RunResult,
   type TaskMeta,
@@ -161,6 +162,22 @@ function taskSummary(meta: TaskMeta, home: string): string {
     `  type ${meta.subagentType}, model ${meta.model}${meta.thinking ? `:${meta.thinking}` : ""}, ${meta.background ? "background" : "foreground"}${meta.readonly ? ", readonly" : ""}, ${Math.round((end - start) / 1000)}s, ${meta.usage.turns} turns`,
     `  output ${outputPath(home, meta.id)}${meta.worktree ? `\n  worktree ${meta.worktree.path} (branch ${meta.worktree.branch})` : ""}${meta.error ? `\n  error: ${meta.error}` : ""}`,
   ].join("\n");
+}
+
+/** Follow a task owned by another process through its stored meta until it settles or `signal` aborts. */
+async function pollUntilSettled(home: string, id: string, signal: AbortSignal | undefined): Promise<RunResult | undefined> {
+  while (!signal?.aborted) {
+    const meta = readMeta(home, id);
+    if (meta && meta.status !== "running" && meta.status !== "queued") {
+      let output = "";
+      try {
+        output = readFileSync(outputPath(home, id), "utf8");
+      } catch {}
+      return { meta, output, ok: meta.status === "done" };
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return undefined;
 }
 
 function resultText(r: RunResult, home: string): string {
@@ -335,7 +352,11 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
           const home = pstackHome();
           const meta = readMeta(home, params.taskId);
           if (!meta) throw new Error(`Unknown task "${params.taskId}".`);
-          const pending = getRunner().wait(params.taskId);
+          const live = (m: TaskMeta) => m.status === "running" || m.status === "queued";
+          // Tasks owned by another Pi process (e.g. a subagent's own children) are followed through the store.
+          const pending =
+            getRunner().wait(params.taskId) ??
+            (params.wait && live(meta) ? pollUntilSettled(home, params.taskId, signal) : undefined);
           if (pending && params.wait) {
             const timeout = (params.timeoutSeconds ?? 600) * 1000;
             let timer: ReturnType<typeof setTimeout> | undefined;
@@ -345,7 +366,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
               new Promise<"aborted">((r) => signal?.addEventListener("abort", () => r("aborted"), { once: true })),
             ]);
             clearTimeout(timer);
-            if (outcome === "timeout" || outcome === "aborted") {
+            if (outcome === "timeout" || outcome === "aborted" || outcome === undefined) {
               const now = readMeta(home, params.taskId)!;
               return { content: [{ type: "text", text: `Still ${now.status} (${outcome}).\n${taskSummary(now, home)}` }], details: now };
             }
@@ -376,6 +397,11 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
           if (!meta) throw new Error(`Unknown task "${params.taskId}".`);
           const pending = getRunner().wait(params.taskId);
           if (!pending || !getRunner().cancel(params.taskId)) {
+            if (meta.status === "running" || meta.status === "queued") {
+              throw new Error(
+                `Task ${meta.id} is ${meta.status} but owned by another Pi process (pid ${meta.ownerPid}); only its owner can cancel it. Cancel the owning task instead${meta.parentTaskId ? ` (${meta.parentTaskId})` : ""}.`,
+              );
+            }
             return { content: [{ type: "text", text: `Task ${meta.id} is not running (status ${meta.status}).` }], details: meta };
           }
           const r = await pending;
@@ -443,7 +469,16 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     const parentReadonly = process.env.PSTACK_READONLY === "1";
     let meta: TaskMeta;
     if (previous) {
-      meta = { ...previous, model, thinking, background, readonly: parentReadonly || (params.readonly ?? previous.readonly), parentSessionId: ctx.sessionManager.getSessionId() };
+      meta = {
+        ...previous,
+        model,
+        thinking,
+        background,
+        depth,
+        parentTaskId: process.env.PSTACK_TASK_ID || undefined,
+        readonly: parentReadonly || (params.readonly ?? previous.readonly),
+        parentSessionId: ctx.sessionManager.getSessionId(),
+      };
     } else {
       const id = newTaskId();
       let cwd = ctx.cwd;
@@ -485,8 +520,9 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     );
     const head = [`taskId: ${meta.id}`, meta.environmentNote ? `environment_note: ${meta.environmentNote}` : "", meta.worktree ? `worktree: ${meta.worktree.path} (branch ${meta.worktree.branch})` : ""].filter(Boolean);
     if (background) {
-      const text = [...head, "status: running in background", `output: ${outputPath(home, meta.id)}`, "Check with TaskStatus / TaskOutput (wait: true to block). Do not resume a running task."].join("\n");
-      return { content: [{ type: "text" as const, text }], details: { taskId: meta.id, status: "running", background: true } };
+      const status = readMeta(home, meta.id)?.status ?? "running";
+      const text = [...head, `status: ${status} in background`, `output: ${outputPath(home, meta.id)}`, "Check with TaskStatus / TaskOutput (wait: true to block). Do not resume a running task."].join("\n");
+      return { content: [{ type: "text" as const, text }], details: { taskId: meta.id, status, background: true } };
     }
     const abort = () => getRunner().cancel(meta.id);
     signal?.addEventListener("abort", abort, { once: true });
@@ -510,7 +546,18 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     for (const meta of reconcileOrphans(pstackHome())) warn(ctx, `pstack: task ${meta.id} (${meta.description}) ended when its parent Pi exited.`);
   });
 
-  pi.on("session_shutdown", () => runner?.cancelAll());
+  pi.on("session_shutdown", async () => {
+    await runner?.cancelAll();
+  });
+
+  // A subagent exits when the Pi that owns it dies (crash or SIGKILL skip session_shutdown).
+  const ownerPid = Number(process.env.PSTACK_OWNER_PID);
+  if (ownDepth() >= 1 && ownerPid > 0) {
+    watchParent(ownerPid, () => {
+      if (runner) void runner.cancelAll(1000).finally(() => process.exit(130));
+      else process.exit(130);
+    });
+  }
 
   pi.on("session_tree", (_event, ctx) => reconcile(ctx));
 

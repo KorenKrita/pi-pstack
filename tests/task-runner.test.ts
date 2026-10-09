@@ -115,27 +115,33 @@ describe("child launch (T1, T2)", () => {
   const general = BUILTIN_AGENT_TYPES[0]!;
 
   test("bare pi + this package only, session dir, model and thinking split, system prompt file", () => {
-    const args = buildChildArgs("/h", sampleMeta({ thinking: "high" }), general, "do it", launch);
+    const args = buildChildArgs("/h", sampleMeta({ thinking: "high" }), general, launch);
     expect(args).toEqual([
       "--mode", "json", "-p", "--session-dir", "/h/tasks/tabc/session",
       "--no-extensions", "-e", "/pkg/extensions/pstack/index.ts",
       "--no-context-files", "--no-skills", "--skill", "/pkg/skills", "--no-prompt-templates",
       "--model", "anthropic/opus", "--thinking", "high",
       "--append-system-prompt", "/h/tasks/tabc/system.md",
-      "do it",
     ]);
   });
 
   test("resume adds -c; readonly restricts tools but keeps pstack tools", () => {
-    const args = buildChildArgs("/h", sampleMeta({ readonly: true }), general, "p", { ...launch, resume: true });
+    const args = buildChildArgs("/h", sampleMeta({ readonly: true }), general, { ...launch, resume: true });
     expect(args.slice(0, 6)).toEqual(["--mode", "json", "-p", "--session-dir", "/h/tasks/tabc/session", "-c"]);
     expect(args[args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,Task,TaskStatus,TaskOutput,TaskCancel,AskQuestion,pstack_config");
     expect(args).not.toContain("--thinking");
   });
 
+  test("review 3: readonly removes bash for every agent type", () => {
+    for (const agent of BUILTIN_AGENT_TYPES) {
+      const args = buildChildArgs("/h", sampleMeta({ readonly: true }), agent, launch);
+      expect(args[args.indexOf("--tools") + 1]!.split(",")).not.toContain("bash");
+    }
+  });
+
   test("env carries depth, ids and home; agent types include package agents", () => {
     const env = childEnv(sampleMeta({ depth: 2, parentTaskId: "tp", readonly: true }), "/h", {});
-    expect(env).toEqual({ PSTACK_HOME: "/h", PSTACK_DEPTH: "2", PSTACK_TASK_ID: "tabc", PSTACK_PARENT_TASK_ID: "tp", PSTACK_READONLY: "1" });
+    expect(env).toEqual({ PSTACK_HOME: "/h", PSTACK_DEPTH: "2", PSTACK_TASK_ID: "tabc", PSTACK_PARENT_TASK_ID: "tp", PSTACK_READONLY: "1", PSTACK_OWNER_PID: String(process.pid) });
     const names = loadAgentTypes(join(REPO, "agents")).map((a) => a.name);
     expect(names).toEqual(["generalPurpose", "explore", "bash", "browser", "Comment Sicko", "poteto-agent"]);
   });
@@ -270,9 +276,76 @@ describe("Task tool (T3–T8)", () => {
     expect(readFileSync(join(home, "tasks", r.details.taskId, "system.md"), "utf8")).toContain("# Poteto subagent");
     await expect(h.call("Task", { description: "u", prompt: "p", subagent_type: "nope" })).rejects.toThrow(/Available: generalPurpose, explore, bash, browser, Comment Sicko, poteto-agent/);
     const e = JSON.parse(text(await h.call("Task", { description: "e", prompt: "args", subagent_type: "explore" })));
-    expect(e.args[e.args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,bash,Task,TaskStatus,TaskOutput,TaskCancel,AskQuestion,pstack_config");
+    expect(e.args[e.args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,Task,TaskStatus,TaskOutput,TaskCancel,AskQuestion,pstack_config");
     expect(e.env.PSTACK_READONLY).toBe("1");
+    const b = JSON.parse(text(await h.call("Task", { description: "b", prompt: "args", subagent_type: "bash", readonly: true })));
+    expect(b.args[b.args.indexOf("--tools") + 1]).not.toContain("bash");
+    const nb = JSON.parse(text(await h.call("Task", { description: "b", prompt: "args", subagent_type: "bash" })));
+    expect(nb.args[nb.args.indexOf("--tools") + 1]).toContain("bash");
   });
+
+  test("review 4: prompts go on stdin verbatim, even ones that look like options or @files", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    for (const p of ["- Review src/index.ts\n- Do not edit", "@src/index.ts", "--help"]) {
+      const r = await h.call("Task", { description: "p", prompt: `echo:${p}` });
+      expect(text(r)).toBe(p);
+      const args = JSON.parse(readFileSync(join(home, "tasks", r.details.taskId, "events.jsonl"), "utf8").split("\n")[0]!);
+      expect(args.type).toBe("session");
+    }
+    const seen = JSON.parse(text(await h.call("Task", { description: "a", prompt: "args" })));
+    expect(seen.args.at(-1)).toBe(join(home, "tasks", seen.env.PSTACK_TASK_ID, "system.md"));
+  });
+
+  test("review 5: resume recomputes depth and parent from the current caller", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    const id = (await h.call("Task", { description: "r", prompt: "echo:x" })).details.taskId;
+    process.env.PSTACK_DEPTH = "1";
+    process.env.PSTACK_TASK_ID = "tcaller";
+    const r = JSON.parse(text(await h.call("Task", { description: "r", prompt: "args", resume: id })));
+    expect(r.env.PSTACK_DEPTH).toBe("2");
+    expect(r.env.PSTACK_PARENT_TASK_ID).toBe("tcaller");
+    expect(readMeta(home, id)).toMatchObject({ depth: 2, parentTaskId: "tcaller" });
+    process.env.PSTACK_DEPTH = "2";
+    await expect(h.call("Task", { description: "r", prompt: "echo:x", resume: id })).rejects.toThrow(/nesting limit/);
+  });
+
+  test("review 6: tasks owned by another process: wait follows the store; cancel says who owns it", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    writeMeta(home, sampleMeta({ id: "tother", status: "running", ownerPid: process.ppid, parentTaskId: "tp" }));
+    await expect(h.call("TaskCancel", { taskId: "tother" })).rejects.toThrow(/owned by another Pi process.*\(tp\)/);
+    const waiting = h.call("TaskOutput", { taskId: "tother", wait: true, timeoutSeconds: 10 });
+    await Bun.sleep(300);
+    writeFileSync(join(home, "tasks", "tother", "output.md"), "theirs");
+    writeMeta(home, { ...readMeta(home, "tother")!, status: "done" });
+    expect(text(await waiting)).toBe("theirs");
+  });
+
+  test("review 7: a queued background task is reported as queued", async () => {
+    writeFileSync(join(home, "config.json"), JSON.stringify({ maxConcurrent: 1 }));
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    const a = await h.call("Task", { description: "a", prompt: "sleep:300", run_in_background: true });
+    const b = await h.call("Task", { description: "b", prompt: "echo:b", run_in_background: true });
+    expect([a.details.status, b.details.status]).toEqual(["running", "queued"]);
+    expect(text(b)).toContain("status: queued in background");
+    await h.call("TaskOutput", { taskId: b.details.taskId, wait: true });
+  });
+
+  test("review 2: shutdown waits for children, escalating to SIGKILL, and settles their meta", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    const id = (await h.call("Task", { description: "s", prompt: "ignore-term", run_in_background: true })).details.taskId;
+    await Bun.sleep(400);
+    const pid = readMeta(home, id)!.pid!;
+    const t0 = Date.now();
+    await h.emit("session_shutdown", {});
+    expect(Date.now() - t0).toBeLessThan(6000);
+    expect(readMeta(home, id)!.status).toBe("cancelled");
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 10000);
 
   test("cloud runs locally with a note", async () => {
     const h = makeHost();
@@ -311,6 +384,17 @@ describe("Task tool (T3–T8)", () => {
 describe("orphans (T5)", () => {
   test("running tasks whose owner Pi is gone become errors at session_start", async () => {
     const dead = 2 ** 22 + 12345;
+    const kills: unknown[] = [];
+    const realKill = process.kill;
+    // Review 1: a live process at the stored child pid (pid reuse) must not be signalled.
+    writeMeta(home, sampleMeta({ id: "treuse", status: "running", ownerPid: dead, pid: process.pid }));
+    (process as any).kill = (pid: number, sig?: unknown) => (sig === 0 || sig === undefined ? realKill(pid, 0 as any) : kills.push([pid, sig]), true);
+    try {
+      expect(reconcileOrphans(home).map((m) => m.id)).toEqual(["treuse"]);
+    } finally {
+      (process as any).kill = realKill;
+    }
+    expect(kills).toEqual([]);
     writeMeta(home, sampleMeta({ id: "torph", status: "running", ownerPid: dead, pid: dead + 1 }));
     writeMeta(home, sampleMeta({ id: "tmine", status: "running", ownerPid: process.pid }));
     expect(reconcileOrphans(home).map((m) => m.id)).toEqual(["torph"]);
