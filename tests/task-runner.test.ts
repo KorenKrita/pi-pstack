@@ -356,6 +356,15 @@ describe("Task tool (T3–T8)", () => {
     expect(seen.args.at(-1)).toBe(join(home, "tasks", seen.env.PSTACK_TASK_ID, "system.md"));
   });
 
+  test("review 5.2: a leading own skill command (/how …) goes to the child as /skill:how … (print mode cannot run command handlers that send messages)", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    const r = await h.call("Task", { description: "c", prompt: "/how echo this" });
+    expect(readFileSync(join(home, "tasks", r.details.taskId, "prompt.md"), "utf8").trim()).toBe("/skill:how echo this");
+    const other = await h.call("Task", { description: "o", prompt: "echo:/not-a-skill x" });
+    expect(text(other)).toBe("/not-a-skill x");
+  });
+
   test("review 5: resume recomputes depth and parent from the current caller", async () => {
     const h = makeHost();
     await h.emit("session_start", { reason: "startup" });

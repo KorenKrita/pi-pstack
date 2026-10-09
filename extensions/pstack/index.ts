@@ -727,7 +727,12 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     }
     writeMeta(home, meta);
 
-    const done = getRunner().start(meta, agent, params.prompt, previous !== undefined, (p) =>
+    // A prompt that starts with an own skill command (`/how …`) would hit the child's command handler, which
+    // forwards via sendUserMessage — and in print mode that lands after the session is disposed (no reply).
+    // Send Pi's equivalent `/skill:<name> …` instead: the child expands the skill directly.
+    const lead = /^\/([a-z0-9-]+)(?=\s|$)/.exec(params.prompt.trimStart());
+    const childPrompt = lead && skillMetas.some((s) => s.name === lead[1]) ? `/skill:${params.prompt.trimStart().slice(1)}` : params.prompt;
+    const done = getRunner().start(meta, agent, childPrompt, previous !== undefined, (p) =>
       background
         ? undefined
         : onUpdate?.({
