@@ -8,7 +8,7 @@
   "license": "MIT",
   "pi": {
     "extensions": ["./extensions/pstack/index.ts"],
-    "skills": ["./skills"]
+    "skills": ["./skills", "./extras/skills"]
   },
   "scripts": {
     "sync": "bun scripts/sync.ts",

@@ -44,6 +44,7 @@ Run `/setup-pstack` once. It lists your models with configured credentials, asks
 - **Resume** (`resume: <taskId>`): continues that child's own Pi session (`--session-dir … -c`) with the new prompt. Refused while the task is running. Depth and parent are recomputed from the resuming caller, so resume cannot bypass the nesting limit.
 - **Types**: `generalPurpose` (default), `explore` (read-only tools, no bash), `bash`, `browser` (no built-in browser; told to use control-ui or CLI tools), and the package agents `poteto-agent`, `Comment Sicko` (their body is appended to the child system prompt).
 - **`readonly: true`** limits the child to `read, grep, find, ls` (plus pstack tools; never `bash`, whatever the type) and tells it not to write. It is a tool restriction, not a sandbox. A readonly child's own Tasks are readonly too.
+- **MCP**: agent-mode children get Pi's MCP client and codemode (`-e builtin:mcp -e builtin:codemode`) when the parent runs them, so they connect to the same `mcp.json` servers; readonly children get no MCP, as in Cursor.
 - **Prompt** is sent on the child's stdin, so briefs starting with `-` or `@` arrive verbatim.
 - **Nesting**: root chat plus at most 2 subagent levels (coordinator → track → worker). A depth-2 child's `Task` returns a nesting-limit error.
 - **`isolation: "worktree"`** (plugin contract): runs the child in `git worktree add $PSTACK_HOME/worktrees/<id> -b pstack/<id>` from the current repo's HEAD; the worktree is kept for you to review and clean up.
@@ -63,15 +64,15 @@ Both are plugin contracts: Cursor's commands are not documented, so the behaviou
 
 ## Status
 
-Provided: activation, commands, prompt injection, `/setup-pstack` with `pstack_config`, `AskQuestion`, the local `Task` runtime with `TaskStatus` / `TaskOutput` / `TaskCancel`, completion notifications, `/goal`, `/loop`.
+Provided: activation, commands, prompt injection, `/setup-pstack` with `pstack_config`, `AskQuestion`, the local `Task` runtime with `TaskStatus` / `TaskOutput` / `TaskCancel`, completion notifications, `/goal`, `/loop`, MCP for agent-mode Tasks plus the server inventory in the system prompt (Cursor's `mcps/`), and a `create-skill` skill (`extras/skills/create-skill/`, the plugin's own draft / validate / test / iterate and description-optimization workflow; Cursor's text is not public).
 
-Not provided: Cursor's `create-skill` and `mcps/` (the system prompt says how to do without them), cloud agents, Bugbot.
+Not provided: cloud agents, Bugbot (external GitHub product).
 
 ## Development
 
 ```sh
 bun install
-bun run sync        # regenerate skills/ and agents/ from the pinned upstream (never hand-edit them)
+bun run sync        # regenerate skills/ and agents/ from the pinned upstream (never hand-edit them; extras/ is ours)
 bun run check       # validate generated output
 bun test            # unit tests (deterministic, temp dirs)
 bunx tsc --noEmit

@@ -185,17 +185,28 @@ export function childSystemPrompt(meta: TaskMeta, agent: AgentType): string {
 export interface ChildLaunch {
   extensionPath: string;
   skillsDir: string;
+  /** This package's non-vendored skills dir (create-skill), loaded with `--skill` too. */
+  extraSkillsDir?: string;
   resume: boolean;
+  /** Pi built-in extensions the parent runs that the child should get too (e.g. `mcp`, `codemode`). */
+  builtins?: string[];
 }
+
+/** Built-ins a child gets when not readonly: Pi's MCP client and codemode (how MCP tools are reached by default). */
+export const CHILD_BUILTINS = ["mcp", "codemode"];
 
 /** Arguments after the `pi` command. The prompt is sent on stdin, so it is never parsed as options or `@file`. */
 export function buildChildArgs(home: string, meta: TaskMeta, agent: AgentType, launch: ChildLaunch): string[] {
   const dir = taskDir(home, meta.id);
   const args = ["--mode", "json", "-p", "--session-dir", join(dir, "session")];
   if (launch.resume) args.push("-c");
+  args.push("--no-extensions", "-e", launch.extensionPath);
+  // Agent mode keeps MCP (same servers as the parent, from mcp.json); readonly strips it, as in Cursor.
+  if (!meta.readonly) for (const b of launch.builtins ?? []) args.push("-e", `builtin:${b}`);
+  args.push("--no-context-files", "--no-skills", "--skill", launch.skillsDir);
+  if (launch.extraSkillsDir) args.push("--skill", launch.extraSkillsDir);
   args.push(
-    "--no-extensions", "-e", launch.extensionPath,
-    "--no-context-files", "--no-skills", "--skill", launch.skillsDir, "--no-prompt-templates",
+    "--no-prompt-templates",
     "--model", meta.model,
   );
   if (meta.thinking) args.push("--thinking", meta.thinking);
@@ -296,7 +307,7 @@ export class TaskRunner {
 
   constructor(
     private readonly home: string,
-    private readonly launch: Omit<ChildLaunch, "resume">,
+    private readonly launch: Omit<ChildLaunch, "resume" | "builtins"> & { builtins?: () => string[] },
     private readonly piCommand: () => string[] = defaultPiCommand,
   ) {}
 
@@ -396,7 +407,7 @@ export class TaskRunner {
 
     const run = () => {
       const [command, ...pre] = this.piCommand();
-      const args = [...pre, ...buildChildArgs(this.home, current, agent, { ...this.launch, resume })];
+      const args = [...pre, ...buildChildArgs(this.home, current, agent, { ...this.launch, builtins: this.launch.builtins?.(), resume })];
       this.active++;
       try {
         child = spawn(command!, args, { cwd: current.cwd, env: childEnv(current, this.home), stdio: ["pipe", "pipe", "pipe"] });

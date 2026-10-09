@@ -145,6 +145,15 @@ describe("child launch (T1, T2)", () => {
     expect(args).not.toContain("--thinking");
   });
 
+  test("agent mode gets the parent's MCP/codemode built-ins; readonly strips them", () => {
+    const withMcp = { ...launch, builtins: ["mcp", "codemode"] };
+    const agentArgs = buildChildArgs("/h", sampleMeta(), general, withMcp);
+    expect(agentArgs.slice(5, 11)).toEqual(["--no-extensions", "-e", "/pkg/extensions/pstack/index.ts", "-e", "builtin:mcp", "-e"]);
+    expect(agentArgs).toContain("builtin:codemode");
+    const ro = buildChildArgs("/h", sampleMeta({ readonly: true }), general, withMcp);
+    expect(ro.filter((a) => a.startsWith("builtin:"))).toEqual([]);
+  });
+
   test("review 3: readonly removes bash for every agent type", () => {
     for (const agent of BUILTIN_AGENT_TYPES) {
       const args = buildChildArgs("/h", sampleMeta({ readonly: true }), agent, launch);

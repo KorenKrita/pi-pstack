@@ -298,7 +298,7 @@ export const CURSOR_ALLOWLIST: { file: string; text: string; reason: string }[] 
 
 /** Skill names referenced in prose that are not vendored here but are expected to exist. */
 export const EXTERNAL_SKILLS: Record<string, string> = {
-  "create-skill": "Cursor built-in skill-authoring skill; a later step ships a Pi equivalent.",
+  "create-skill": "Cursor built-in skill-authoring skill; pi-pstack ships its own in extras/skills/create-skill.",
   babysit: "Cursor built-in PR babysit skill; poteto-mode explicitly routes away from it.",
   loop: "Cursor `/loop` built-in command; the extension must provide it.",
   goal: "Cursor `/goal` built-in command; the extension must provide it.",

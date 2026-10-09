@@ -44,6 +44,7 @@ interface FakeOptions {
   /** Skill commands as Pi's resource loader reports them: name → SKILL.md path. */
   skillCommands?: Record<string, string>;
   skillsDir?: string;
+  extraSkillsDir?: string;
 }
 
 function makePi(opts: FakeOptions = {}) {
@@ -119,7 +120,7 @@ function makePi(opts: FakeOptions = {}) {
     return options.sections;
   };
 
-  pstackExtension(pi, { skillsDir: opts.skillsDir ?? REPO_SKILLS });
+  pstackExtension(pi, { skillsDir: opts.skillsDir ?? REPO_SKILLS, extraSkillsDir: opts.extraSkillsDir });
   return { pi, ctx, tools, lateTools, commands, branch, sent, notes, emit, turn, active: () => active };
 }
 
@@ -371,6 +372,8 @@ describe("per-turn injection (R3)", () => {
     expect(adapter).toContain(`Agent store (Cursor's per-workspace store; orchestrate/, docs/): ${join(home, "projects")}/--`);
     expect(adapter).toMatch(/bun \S+\/skills\/poteto-mode\/scripts\/orch\/orch\.ts --store/);
     expect(adapter).toContain("GoalSet/GoalDone");
+    expect(adapter).toContain("MCP servers connected now: none.");
+    expect(adapter).toContain("this package's `create-skill` skill");
 
     // Path hints fire once per session.
     await f.emit("tool_result", { toolName: "read", input: { path: "src/b.ts" }, content: [], isError: false });
@@ -594,5 +597,30 @@ describe("pstack_config (R5) and Task (R7)", () => {
     expect(explicit.args.slice(explicit.args.indexOf("--model"), explicit.args.indexOf("--model") + 4)).toEqual(["--model", "anthropic/opus", "--thinking", "max"]);
     const parent = JSON.parse((await run("inherit-parent")).content[0].text);
     expect(parent.args.slice(parent.args.indexOf("--model"), parent.args.indexOf("--model") + 4)).toEqual(["--model", "anthropic/opus", "--thinking", "high"]);
+  });
+});
+
+describe("create-skill (extras)", () => {
+  test("the package's create-skill is an own skill: command, activation on read, child --skill", () => {
+    const EXTRAS = fileURLToPath(new URL("../extras/skills", import.meta.url));
+    const f = makePi({ extraSkillsDir: EXTRAS, skillCommands: { "create-skill": join(EXTRAS, "create-skill/SKILL.md") } });
+    return (async () => {
+      await f.emit("session_start", { reason: "startup" });
+      expect(f.commands.has("create-skill")).toBe(true);
+      await f.emit("tool_result", { toolName: "read", input: { path: join(EXTRAS, "create-skill/SKILL.md") }, content: [], isError: false });
+      expect(f.branch.filter((e: any) => e.customType === "pstack-state").at(-1)?.data).toEqual({ active: true, poteto: false });
+    })();
+  });
+});
+
+describe("MCP inventory (Cursor mcps/ map)", () => {
+  test("adapter lists connected MCP servers and their tools", async () => {
+    const f = makePi({ otherTools: ["mcp__docs__search", "mcp__docs__fetch", "mcp__jira__get_issue", "web_search"] });
+    await f.emit("session_start", { reason: "startup" });
+    await f.commands.get("pstack").handler("on", f.ctx);
+    const adapter = (await f.turn()).pstack_adapter as string;
+    expect(adapter).toContain("  - docs: 2 tool(s) (search, fetch)");
+    expect(adapter).toContain("  - jira: 1 tool(s) (get_issue)");
+    expect(adapter).not.toContain("web_search");
   });
 });

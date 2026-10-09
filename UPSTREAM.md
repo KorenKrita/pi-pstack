@@ -104,8 +104,8 @@ Skill text is left as-is except for setup-pstack and the per-role readers (rules
 | **Bugbot** | External GitHub product; the adapter note says so. |
 | **`/loop`**, **`/goal`** commands | Provided as plugin contracts (Cursor's semantics are not public): `/goal` continues normally ended runs until `GoalDone`, pauses on abort/error/blocked; `/loop` sends the prompt unchanged on a fixed or model-scheduled interval, only while Pi runs. Model-facing `GoalSet` / `GoalDone` / `LoopStart` / `LoopStop` / `LoopSchedule`. |
 | **Agent store** ("the current agent's store", orchestrate / multi-phase-plan) | Provided: `$PSTACK_HOME/projects/--<cwd>--/`, named in the adapter note with the `orch.ts --store` invocation. |
-| **create-skill** skill | Not provided; the adapter note tells the model to author Pi Agent Skills directly (format summary) and test by running them. |
-| **`mcps/` directory** / available-tools map (`why`) | Not provided; the adapter note says MCP servers are whatever MCP tools are in the tool list. |
+| **create-skill** skill | Provided as a plugin contract (Cursor's text is not public): `extras/skills/create-skill/SKILL.md`, loaded with the package skills and in Task children. Covers what callers ask of it: pin down job/triggers/placement, draft in Agent Skills format, validate, test in clean `Task` children, iterate, and a description-optimization loop (should/should-not-trigger sets judged by clean children). |
+| **`mcps/` directory** / available-tools map (`why`) | Provided: Pi's built-in MCP client is the source. The adapter note lists the MCP servers connected now with their tools and how to reach them (codemode / tool_search). Agent-mode Task children get `-e builtin:mcp -e builtin:codemode` when the parent runs them (same `mcp.json` servers); `readonly` children get none ("readonly strips MCPs"). |
 | **babysit** built-in (routed *away* from) | Nothing to provide. |
 
 Known activation gap: pstack activates on `/skill:<name>`, a pstack slash command, `/pstack on`, or a successful `read` tool call on one of this package's `SKILL.md` files. Reading a SKILL.md through `bash` (`cat`, `sed`) is not detected.

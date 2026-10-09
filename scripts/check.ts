@@ -65,8 +65,9 @@ export function findSkillRefs(text: string): string[] {
   return [...refs];
 }
 
-// Slash tokens that are filesystem paths, not skills (e.g. "keep the harness in `/tmp`").
-const SLASH_NOISE = new Set(["tmp"]);
+// Slash tokens that are filesystem paths or Pi's own commands, not skills
+// (e.g. "keep the harness in `/tmp`", "`/skill:<name>`", "`/reload`").
+const SLASH_NOISE = new Set(["tmp", "skill", "reload"]);
 
 export function checkSkillRefs(file: string, text: string, known: Set<string>): Finding[] {
   return findSkillRefs(stripUrls(text))
@@ -85,8 +86,10 @@ function walk(dir: string): string[] {
 }
 
 export function checkRepo(root: string): { findings: Finding[]; files: number; skills: number } {
-  const files = [...walk(join(root, "skills")), ...walk(join(root, "agents"))];
-  const skillFiles = files.filter((f) => basename(f) === "SKILL.md" && dirname(dirname(f)) === join(root, "skills"));
+  // extras/skills holds this package's own (non-vendored) skills; they are checked the same way.
+  const skillRoots = [join(root, "skills"), join(root, "extras", "skills")];
+  const files = [...skillRoots.flatMap(walk), ...walk(join(root, "agents"))];
+  const skillFiles = files.filter((f) => basename(f) === "SKILL.md" && skillRoots.includes(dirname(dirname(f))));
   const known = new Set(skillFiles.map((f) => basename(dirname(f))));
   const findings: Finding[] = [];
   for (const abs of files) {

@@ -1,7 +1,7 @@
 // pi-pstack extension: activation state, /pstack and per-skill commands, per-turn prompt
 // injection, and the AskQuestion / Task / pstack_config tools. Pure logic lives in config.ts
 // and rules.ts; this file is Pi wiring only.
-import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,7 @@ import {
   type RoleMap,
 } from "./config";
 import {
+  CHILD_BUILTINS,
   CLOUD_NOTE,
   MAX_DEPTH,
   TaskRunner,
@@ -237,30 +238,59 @@ function resultText(r: RunResult, home: string): string {
 }
 
 export interface PstackOptions {
-  /** This package's `skills/` dir. Default: resolved from this file's location. */
+  /** This package's `skills/` dir (vendored from upstream). Default: resolved from this file's location. */
   skillsDir?: string;
+  /** This package's own skills that are not vendored (`extras/skills/`, e.g. create-skill). Default: resolved
+   * from this file's location; with an explicit `skillsDir` and no `extraSkillsDir`, none. */
+  extraSkillsDir?: string;
 }
 
 export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): void {
-  const skillsDir = options.skillsDir ?? resolve(dirname(fileURLToPath(import.meta.url)), "../../skills");
-  const skills = loadOwnSkills(skillsDir);
+  const here = dirname(fileURLToPath(import.meta.url));
+  const skillsDir = options.skillsDir ?? resolve(here, "../../skills");
+  const extraSkillsDir = options.extraSkillsDir ?? (options.skillsDir ? undefined : resolve(here, "../../extras/skills"));
+  const skillDirs = [skillsDir, ...(extraSkillsDir && existsSync(extraSkillsDir) ? [extraSkillsDir] : [])];
+  const skills = skillDirs.flatMap(loadOwnSkills).sort((a, b) => a.meta.name.localeCompare(b.meta.name));
   const skillMetas = skills.map((s) => s.meta);
   /** realpath of each own SKILL.md → skill name. */
-  const skillsRoot = realpathOrSelf(skillsDir) + sep;
+  const skillsRoots = skillDirs.map((d) => realpathOrSelf(d) + sep);
   const ownSkillFiles = new Map(
     skills
       .map((s) => [realpathOrSelf(s.file), s.meta.name] as const)
-      .filter(([real]) => real.startsWith(skillsRoot) && basename(real) === "SKILL.md"),
+      .filter(([real]) => skillsRoots.some((root) => real.startsWith(root)) && basename(real) === "SKILL.md"),
   );
 
   const extensionFile = fileURLToPath(import.meta.url);
   const agentTypes = loadAgentTypes(resolve(skillsDir, "../agents"));
+  /** CHILD_BUILTINS the parent itself runs (absent with --no-mcp / -ne), detected from tool sources.
+   * MCP servers connect asynchronously, so this is read at each spawn, not cached at load. */
+  const parentBuiltins = (): string[] => {
+    const loaded = new Set(pi.getAllTools().map((t) => t.sourceInfo?.path).filter((p): p is string => !!p && p.startsWith("builtin:")));
+    return CHILD_BUILTINS.filter((b) => loaded.has(`builtin:${b}`));
+  };
+
+  /** Cursor's `mcps/` directory / available-tools map: the MCP servers and their tools in this session. */
+  const mcpInventory = (): string[] => {
+    const byServer = new Map<string, string[]>();
+    for (const t of pi.getAllTools()) {
+      const m = /^mcp__(.+?)__(.+)$/.exec(t.name);
+      if (m) byServer.set(m[1]!, [...(byServer.get(m[1]!) ?? []), m[2]!]);
+    }
+    const header =
+      "- MCP (Cursor's `mcps/` directory / available-tools map): Pi's own MCP client. Tools are named `mcp__<server>__<tool>`; servers marked codemode in the mcp_servers prompt section are called from `codemode` scripts (find them with `searchTools()` / `describeTool()`), deferred ones load with `tool_search`. Agent-mode Tasks get the same servers; `readonly` Tasks get none.";
+    if (!byServer.size) return [header, "- MCP servers connected now: none."];
+    return [
+      header,
+      "- MCP servers connected now:",
+      ...[...byServer].map(([s, tools]) => `  - ${s}: ${tools.length} tool(s) (${tools.slice(0, 8).join(", ")}${tools.length > 8 ? ", …" : ""})`),
+    ];
+  };
   let runner: TaskRunner | undefined;
   let runnerHome = "";
   const getRunner = (): TaskRunner => {
     const home = pstackHome();
     if (!runner || runnerHome !== home) {
-      runner = new TaskRunner(home, { extensionPath: extensionFile, skillsDir });
+      runner = new TaskRunner(home, { extensionPath: extensionFile, skillsDir, extraSkillsDir: skillDirs[1], builtins: parentBuiltins });
       runnerHome = home;
     }
     return runner;
@@ -1119,8 +1149,8 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       '- Everything runs locally: an upstream `environment: "cloud"` request runs as the approved local substitute, with no cloud isolation or survive-shutdown guarantee.',
       `- Task runs each subagent as a local Pi child process (nesting: root plus ${MAX_DEPTH} levels). Background tasks return a taskId; check them with TaskStatus / TaskOutput (wait: true blocks) and stop them with TaskCancel, never by resuming. \`readonly\` restricts tools; it is not a sandbox. \`isolation: "worktree"\` runs in a fresh git worktree. Background tasks end when this Pi process exits.`,
       "- Bugbot is an external GitHub product, not a tool here.",
-      "- Cursor's built-in `create-skill` skill does not exist in Pi: author SKILL.md files directly in Pi's Agent Skills format (directory named after the skill; frontmatter `name` = directory name, lowercase a-z0-9-, and a specific `description`; body in Markdown; relative paths resolve against the skill dir), then test by running the skill.",
-      "- There is no Cursor `mcps/` directory: the MCP servers available are whatever MCP tools appear in your tool list (none if no MCP extension is loaded).",
+      "- Cursor's built-in `create-skill` is provided as this package's `create-skill` skill (draft / validate / test / iterate and description optimization); load it wherever a pstack skill hands off to create-skill.",
+      ...mcpInventory(),
     ].join("\n");
   };
 
