@@ -56,8 +56,10 @@ The review ([`docs/reviews/step5.md`](../reviews/step5.md)) made the drivers str
 | `c4d94b7` | `run4-verify.ts` | 8/8 | New skill `verify-calc-fixture` with a folded `description: >`; fresh session discovers it, runs `bun src/cli.ts mean 2 4` successfully, and evidence written by the run proves stdout `3`, exit 0 |
 | `c4d94b7` | `run9-mcp.ts` | 11/11 | Adds `isolation: "worktree"`: the worktree holds a copy of the parent's untracked `.pi/mcp.json`; the child called only `mcp__allowed__ping` and `mcp__projonly__ping` |
 | `c4d94b7` | `run5-bg.ts` | 20/20 | No-wake windows start at the `TaskCancel` / `/pstack off` record; notifications matched on `details.taskId` |
+| `206bea8` | `run9-mcp.ts` | 11/11 | Worktree MCP mirror (`2bea903`): same results as `c4d94b7` with the mirror in place |
+| `206bea8` | `run4-verify.ts` | 6/8 as run; 8/8 on replay | The new skill (`verify-calc`, quoted description) was discovered; the fresh session drove `mean 2 4` through the skill's own `run-case.sh` (not under `helpers/`), writing `artifacts/mean/two-value.txt` with `3` and `exit=0`. The driver's predicates only knew `helpers/*.sh` and `exit:`; widened to any `.sh` inside the generated skill and `exit=`, with unit counterexamples, then replayed on this run's events and files (8/8) and on the `c4d94b7` run (still 8/8). Not re-run with a model |
 
-Every driver now exits non-zero on any FAIL. Resume under a less-trusted caller is covered by unit test only (`review 5.1`), not by a real-Pi run. The worktree copy of `.pi/mcp.json` appears untracked (`?? .pi/`) in the worktree's `git status` unless the repo ignores it, just as it does in the parent checkout.
+Every driver now exits non-zero on any FAIL. Covered by unit tests only, not by a real-Pi run: resume under a less-trusted caller (`review 5.1`), the worktree mirror of an uncommitted edit to a tracked `.pi/mcp.json` and its refresh on resume (`review 5.5`). Since `2bea903` the worktree copy stays out of `git status` and `git add -A` (skip-worktree when tracked, a self-ignoring `.pi/.gitignore` when untracked); the `c4d94b7` run still showed it as `?? .pi/`.
 
 ### Driver FAILs
 

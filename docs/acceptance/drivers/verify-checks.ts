@@ -6,7 +6,8 @@ const execSegments = (command: string): string[] =>
   command
     .split(/&&|\|\||;|\||\n/)
     .map((seg) => seg.trim().replace(/^(?:cd\s+\S+\s*|env\s+|[A-Z_]+=\S+\s+)*/, ""))
-    .filter((s) => /^(?:bun\s+(?:run\s+)?\S*src\/cli\.ts\b|(?:bash\s+|sh\s+)?\S*helpers\/\S+\.sh\b)/.test(s));
+    // the CLI itself, or any shell script the generated skill ships (`.pi/skills/<skill>/…/*.sh`, or a `helpers/` path)
+    .filter((s) => /^(?:bun\s+(?:run\s+)?\S*src\/cli\.ts\b|(?:bash\s+|sh\s+)?\S*(?:\.pi\/skills\/[^/\s]+\/|helpers\/)\S*\.sh\b)/.test(s));
 
 export const execsCli = (command: string): boolean => execSegments(command).length > 0;
 
@@ -18,7 +19,7 @@ export const drivesMean24 = (command: string): boolean => execSegments(command).
  * `<p>.stdout` / `<p>.exit` files tied to `mean 2 4` by a sibling `<p>.cmd` or by a name like `mean-2-4`. */
 export function evidenceProves(files: Record<string, string>): boolean {
   for (const [path, text] of Object.entries(files)) {
-    if (/mean 2 4/.test(text) && /exit:\s*0\b/.test(text) && /(^|\n)3\s*(\n|$)/.test(text)) return true;
+    if (/mean 2 4/.test(text) && /exit\s*[:=]\s*0\b/.test(text) && /(^|\n)3\s*(\n|$)/.test(text)) return true;
     const m = /^(.*)\.stdout$/.exec(path);
     if (!m) continue;
     const p = m[1]!;
