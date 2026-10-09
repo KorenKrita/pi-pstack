@@ -158,6 +158,35 @@ export const RULES: Rule[] = [
     find: /(~|\$HOME)\/\.cursor\//g,
     replace: "$1/.pi/pstack/",
   },
+  // ---------- per-role config reads in Pi (R4). Run after `rules-dir`. ----------
+  {
+    id: "arena-runner-config",
+    description: "Arena runners use pstack_config read; never fall back to Cursor-only model slugs.",
+    files: "skills/arena/SKILL.md",
+    find: "3. Pick the runners. Use the `arena runners` line in `~/.pi/pstack/rules/pstack-models.mdc`. If the rule or that line is missing, default to one each on `claude-opus-5-5-max`, `gpt-5.6-sol-max`, `grok-4.7-xhigh-fast`. An `auto` or `inherit-parent` entry in this line or the cross-judge line means the parent model, so omit `model` for it. If the Task tool rejects a configured entry, run that seat on its family's default and say so. Families go by prefix: `claude-*`, `gpt-*`, and `grok-*`. With no family match, use `claude-opus-5-5-max`. If it rejects a default, use the closest valid slug of the same family from its error message. Spawn more when the arena covers multiple design directions. Same model N times when the work is generation-bound rather than judgment-sensitive.",
+    replace: '3. Pick the runners. Call `pstack_config` with `action: "read"` and use its `arena runners` list only when validation is ok. The tool reads the active `$PSTACK_HOME` (or default) path; never read a fixed path. If missing or invalid, ask the user to run /setup-pstack and stop. For `auto` or `inherit-parent`, omit `model` to use the parent model. If Task rejects a configured model, show the error and ask for a valid Pi model id instead of guessing a Cursor slug. Spawn more when the arena covers multiple design directions. Same model N times when the work is generation-bound rather than judgment-sensitive.',
+  },
+  {
+    id: "arena-judge-config",
+    description: "Arena cross-judge uses the same active config path and Pi ids.",
+    files: "skills/arena/SKILL.md",
+    find: "After all Phase B candidates complete, choose one model from the `arena cross-judge pool` line in `~/.pi/pstack/rules/pstack-models.mdc`. If the rule or that line is missing, choose from `claude-opus-5-5-max`, `gpt-5.6-sol-max`, `grok-4.7-xhigh-fast`. Prefer a different model family from the parent's. Spawn one readonly judge subagent on that model. It sees the rubric and the candidates by path label, scores each criterion, and recommends a base with rationale. It runs in parallel with the parent's reading in Phase D, not with the candidates themselves. Don't spawn the judge while candidates are still writing.",
+    replace: 'After all Phase B candidates complete, use the `arena cross-judge pool` list from the validated `pstack_config` read above. Prefer a different available model from the parent\'s; omit `model` for `auto` or `inherit-parent`. Spawn one readonly judge subagent on that model. It sees the rubric and the candidates by path label, scores each criterion, and recommends a base with rationale. It runs in parallel with the parent\'s reading in Phase D, not with the candidates themselves. Don\'t spawn the judge while candidates are still writing.',
+  },
+  {
+    id: "swarm-worker-config",
+    description: "Swarm worker reads model through the active config tool, not a default-home file.",
+    files: "skills/swarm/SKILL.md",
+    find: "4. Pick the worker model from the `swarm workers` line in `~/.pi/pstack/rules/pstack-models.mdc`. If the rule or that line is missing, use `grok-4.7-xhigh-fast`. For `auto` or `inherit-parent`, omit `model` so the workers run on the parent model. If the Task tool rejects a slug, use the default and say so. If it rejects the default, use the closest valid slug of the same family from its error message. For a model race, name each arm's model up front.",
+    replace: '4. Call `pstack_config` with `action: "read"` and use its `swarm workers` value only when validation is ok. The tool reads the active `$PSTACK_HOME` (or default) path; never read a fixed path. If missing or invalid, ask the user to run /setup-pstack and stop. For `auto` or `inherit-parent`, omit `model` so workers run on the parent model. If Task rejects the configured Pi model id, show its error and ask for a valid choice instead of guessing a Cursor slug. For a model race, name each arm\'s model up front.',
+  },
+  {
+    id: "interrogate-reviewer-config",
+    description: "Interrogate reviewer panel reads the active Pi config instead of Cursor defaults.",
+    files: "skills/interrogate/SKILL.md",
+    find: /Launch all reviewers in a single message using the Task tool\. Use the `interrogate reviewers` line in `~\/\.pi\/pstack\/rules\/pstack-models\.mdc`[\s\S]*?Never treat an alias entry as a rejected slug or apply either fallback to it\./g,
+    replace: 'Call `pstack_config` with `action: "read"` and use its `interrogate reviewers` list only when validation is ok. The tool reads the active `$PSTACK_HOME` (or default) path; never read a fixed path. If missing or invalid, ask the user to run /setup-pstack and stop. Launch one reviewer per configured entry in a single message using Task, extending or shrinking the Reviewer A/B/C labels below to that count. The table is an illustration, not default model choices; only the configured Pi ids are valid.\n\n| Subagent | Configured model |\n|----------|------------------|\n| Reviewer A/B/C (as many as configured) | Corresponding `interrogate reviewers` entry |\n\nFor each reviewer:\n- `subagent_type`: `generalPurpose`\n- `model`: the configured Pi model id; for `auto` or `inherit-parent`, omit `model` so the reviewer uses the parent model.\n- `readonly`: `true`\n\nIf Task rejects an entry, show its error and ask for a valid Pi model id. Do not guess a Cursor slug or treat an alias as a rejected model.',
+  },
   // ---------- setup-pstack in Pi (R5). These run after `rules-dir`, so they match `~/.pi/pstack/`. ----------
   {
     id: "setup-intro",
@@ -191,7 +220,7 @@ export const RULES: Rule[] = [
     files: "skills/setup-pstack/SKILL.md",
     find: "**(b) Apply it.** Build the working table from the skill defaults, and on a re-run keep any role you changed by family, list, or alias (`inherit-parent`, `auto`). `unlimited` leaves every effort as in that table. `large`, `medium`, and `small` set the effort token of every real slug, panel entries included, to `xhigh`, `high`, or `medium`. The effort token is the last token, or the one before a trailing `fast`, on the ladder `max` > `xhigh` > `high` > `medium` > `low`. If the result is not a detected slug, use the same family's detected slug with the highest effort at or below the target, else mark the role as needing a choice. `inherit-parent` and `auto` do not change. So `small` turns `claude-opus-5-5-max` into `claude-opus-5-5-medium`, and `grok-4.7-xhigh-fast` into `grok-4.7-medium-fast`.",
     replace:
-      "**(b) Apply it.** Build the working table from the current choices of step 2; roles without a value stay as needing a choice. On a re-run keep every role's model, list, or alias (`inherit-parent`, `auto`). The budget sets the `:<thinking>` suffix of every real model, panel entries included: `unlimited` keeps each entry's own level (`max` when it has none), and `large`, `medium`, and `small` target `xhigh`, `high`, and `medium`. The ladder is `max` > `xhigh` > `high` > `medium` > `low` > `minimal`. Use the highest level in that model's supported list (adapter note) at or below the target; a model that supports only `off` is written without a suffix. If no supported level is at or below the target, mark the role as needing a choice. `inherit-parent` and `auto` do not change. So `small` turns `<provider>/<id>:max` into `<provider>/<id>:medium`, and under `unlimited` a model whose levels stop at `high` gets `:high`.",
+      "**(b) Apply it.** Build the working table from the current choices of step 2; roles without a value stay as needing a choice. On a re-run keep every role's model, list, or alias (`inherit-parent`, `auto`). The budget sets the `:<thinking>` suffix of every real model, panel entries included: `unlimited` keeps each entry's own level (`max` when it has none), and `large`, `medium`, and `small` target `xhigh`, `high`, and `medium`. The ladder is `max` > `xhigh` > `high` > `medium` > `low` > `minimal`. Use the highest level in that model's supported list (adapter note) at or below the target; a model that supports only `off` is written without a suffix. If no supported level is at or below the target, mark the role as needing a choice. `inherit-parent` and `auto` do not change. So `small` turns `<provider>/<id>:max` into `<provider>/<id>:medium`, and under `unlimited` a model whose levels stop at `high` gets `:high`. The `pstack_config` write tool applies this mapping too; show and confirm this final mapped table, not the unmapped choices, before calling write. Resolve every needs-a-choice role first: write rejects unmappable entries without changing the file.",
   },
   {
     id: "setup-confirm-roles",
@@ -217,7 +246,7 @@ export const RULES: Rule[] = [
     files: "skills/setup-pstack/SKILL.md",
     find: /Write `~\/\.pi\/pstack\/rules\/pstack-models\.mdc` with `alwaysApply: true`[\s\S]*?\ninterrogate reviewers: [^\n]*\n```/g,
     replace: [
-      'Call the `pstack_config` tool with `action: "write"`, the chosen `budget` name (`unlimited`, `large`, `medium`, or `small`), and `roles`: every role below mapped to its value, as a list of strings for the four panel roles. Do not write the file by hand: the tool picks the path (`$PSTACK_HOME/rules/pstack-models.mdc`, default `~/.pi/pstack/rules/pstack-models.mdc`) and overwrites the whole file atomically, so re-runs stay idempotent. The file has `alwaysApply: true`, a `# budget` line with the chosen budget and its target level, and one line per role, using the same labels poteto-mode uses. Shape (values are placeholders):',
+      'After the user confirms the fully mapped table, call the `pstack_config` tool with `action: "write"`, the chosen `budget` name (`unlimited`, `large`, `medium`, or `small`), and `roles`: every role below mapped to its value, as a list of strings for the four panel roles. Do not write the file by hand: the tool picks the path (`$PSTACK_HOME/rules/pstack-models.mdc`, default `~/.pi/pstack/rules/pstack-models.mdc`) and overwrites the whole file atomically, so re-runs stay idempotent. The file has `alwaysApply: true`, a `# budget` line with the chosen budget and its target level, and one line per role, using the same labels poteto-mode uses. Shape (values are placeholders):',
       "",
       "```",
       "---",

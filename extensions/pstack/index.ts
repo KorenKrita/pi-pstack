@@ -3,13 +3,14 @@
 // and rules.ts; this file is Pi wiring only.
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getSupportedThinkingLevels, StringEnum } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage, getSupportedThinkingLevels, StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   BUDGETS,
+  applyBudget,
   formatReport,
   isBudgetName,
   lookupFromRegistry,
@@ -134,11 +135,17 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
   const skills = loadOwnSkills(skillsDir);
   const skillMetas = skills.map((s) => s.meta);
   /** realpath of each own SKILL.md → skill name. */
-  const ownSkillFiles = new Map(skills.map((s) => [realpathOrSelf(s.file), s.meta.name]));
+  const skillsRoot = realpathOrSelf(skillsDir) + sep;
+  const ownSkillFiles = new Map(
+    skills
+      .map((s) => [realpathOrSelf(s.file), s.meta.name] as const)
+      .filter(([real]) => real.startsWith(skillsRoot) && basename(real) === "SKILL.md"),
+  );
 
   let state: PstackState = OFF;
-  /** Tools this extension registered (and therefore may toggle). */
+  /** Tools this extension registered; their current source is rechecked before toggling. */
   const ownedTools = new Set<string>();
+  const extensionPath = realpathOrSelf(fileURLToPath(import.meta.url));
   const toolCollisions: string[] = [];
   const commandCollisions = new Set<string>();
   const shownHints = new Set<string>();
@@ -151,22 +158,37 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     ctx.ui.notify(message, "warning");
   };
 
-  const applyTools = () => {
+  const currentOwnedTools = (ctx: ExtensionContext): Set<string> => {
+    const effective = new Map(pi.getAllTools().map((t) => [t.name, t.sourceInfo.path]));
+    const current = new Set<string>();
+    for (const name of ownedTools) {
+      if (realpathOrSelf(effective.get(name) ?? "") === extensionPath) current.add(name);
+      else if (!toolCollisions.includes(name)) {
+        toolCollisions.push(name);
+        warn(ctx, `pstack: tool "${name}" is now owned by another extension; pstack runs without its own ${name}.`);
+      }
+    }
+    return current;
+  };
+
+  const applyTools = (ctx: ExtensionContext) => {
+    const owned = currentOwnedTools(ctx);
     const current = pi.getActiveTools();
     const next = state.active
-      ? [...new Set([...current, ...ownedTools])]
-      : current.filter((name) => !ownedTools.has(name));
+      ? [...new Set([...current, ...owned])]
+      : current.filter((name) => !owned.has(name));
     if (next.length !== current.length || next.some((n, i) => n !== current[i])) pi.setActiveTools(next);
   };
 
-  const setState = (next: PstackState) => {
-    if (next.active === state.active && next.poteto === state.poteto) return;
-    state = next;
-    pi.appendEntry(STATE_ENTRY, { ...state });
-    applyTools();
+  const setState = (next: PstackState, ctx: ExtensionContext) => {
+    if (next.active !== state.active || next.poteto !== state.poteto) {
+      state = next;
+      pi.appendEntry(STATE_ENTRY, { ...state });
+    }
+    applyTools(ctx);
   };
 
-  const activate = (poteto: boolean) => setState({ active: true, poteto: state.poteto || poteto });
+  const activate = (poteto: boolean, ctx: ExtensionContext) => setState({ active: true, poteto: state.poteto || poteto }, ctx);
 
   /** Name of the own skill that Pi's `/skill:<name>` resolves to, or undefined (unknown or another package's skill). */
   const resolveSkillCommand = (name: string): string | undefined => {
@@ -177,7 +199,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
 
   const reconcile = (ctx: ExtensionContext) => {
     state = stateFromBranch(ctx.sessionManager.getBranch());
-    applyTools();
+    applyTools(ctx);
   };
 
   // ---------- tools ----------
@@ -256,12 +278,12 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
 
   pi.on("session_tree", (_event, ctx) => reconcile(ctx));
 
-  pi.on("input", (event) => {
+  pi.on("input", (event, ctx) => {
     if (event.text.startsWith("/skill:")) {
       const space = event.text.indexOf(" ");
       const name = space === -1 ? event.text.slice(7) : event.text.slice(7, space);
       const own = resolveSkillCommand(name);
-      if (own) activate(own === POTETO_SKILL);
+      if (own) activate(own === POTETO_SKILL, ctx);
     }
     return { action: "continue" };
   });
@@ -270,7 +292,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     const raw = event.input.path;
     if (typeof raw !== "string" || event.isError) return;
     const path = resolveToolPath(raw, ctx.cwd);
-    if (event.toolName === "read" && ownSkillFiles.has(realpathOrSelf(path))) activate(false);
+    if (event.toolName === "read" && ownSkillFiles.has(realpathOrSelf(path))) activate(false, ctx);
     if (!state.active || !["read", "edit", "write"].includes(event.toolName)) return;
     for (const hint of pathHints(skillMetas, path, ctx.cwd, shownHints)) {
       shownHints.add(hint.key);
@@ -280,9 +302,31 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
   });
 
   pi.on("before_agent_start", (event, ctx) => {
-    if (!state.active) return;
-    const sections = buildSections(ctx);
-    for (const [name, text] of sections) event.systemPromptOptions.sections[name] = text;
+    for (const name of ["pstack_adapter", "pstack_rules", "pstack_mode", "pstack_paths"]) {
+      delete event.systemPromptOptions.sections[name];
+    }
+    if (state.active) {
+      for (const [name, text] of buildSections(ctx)) event.systemPromptOptions.sections[name] = text;
+    }
+  });
+
+  // Pi does not re-emit before_agent_start between tool calls in one run. Patch only this
+  // request's prompt, leaving other extensions' sections and the transcript untouched.
+  pi.on("context_with_system", (event, ctx) => {
+    const current = getCurrentSystemMessage(event.messages);
+    if (!current) return;
+    const desired = state.active ? new Map(buildSections(ctx)) : new Map<string, string>();
+    const patch: Record<string, string | null> = {};
+    for (const name of ["pstack_adapter", "pstack_rules", "pstack_mode", "pstack_paths"]) {
+      const text = desired.get(name);
+      const rendered = text ? `<${name}>\n${text}\n</${name}>` : undefined;
+      if (rendered !== current.sections?.[name]) {
+        if (rendered || current.sections?.[name] !== undefined) patch[name] = rendered ?? null;
+      }
+    }
+    if (Object.keys(patch).length) {
+      return { messages: [...event.messages, { role: "system", content: "", sections: patch, timestamp: Date.now() }] };
+    }
   });
 
   const buildSections = (ctx: ExtensionContext): [string, string][] => {
@@ -343,10 +387,10 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
         handler: async (args, cmdCtx) => {
           const sub = args.trim();
           if (sub === "on") {
-            activate(false);
+            activate(false, cmdCtx);
             cmdCtx.ui.notify("pstack: active", "info");
           } else if (sub === "off") {
-            setState(OFF);
+            setState(OFF, cmdCtx);
             cmdCtx.ui.notify("pstack: off", "info");
           } else if (sub === "status" || sub === "") {
             cmdCtx.ui.notify(statusText(cmdCtx), "info");
@@ -365,7 +409,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
               cmdCtx.ui.notify(`pstack: Pi does not resolve /skill:${meta.name} to this package's skill (is its skills dir loaded?).`, "error");
               return;
             }
-            activate(meta.name === POTETO_SKILL);
+            activate(meta.name === POTETO_SKILL, cmdCtx);
             const text = args.trim() ? `/skill:${meta.name} ${args.trim()}` : `/skill:${meta.name}`;
             // expandPromptTemplates routes the text through Pi's own /skill: expansion, so the block is identical.
             pi.sendUserMessage(text, cmdCtx.isIdle() ? { expandPromptTemplates: true } : { expandPromptTemplates: true, deliverAs: "followUp" });
@@ -378,9 +422,10 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
   const statusText = (ctx: ExtensionContext): string => {
     const home = pstackHome();
     const report = validateConfigText(readModelsRule(home), lookupFromRegistry(ctx.modelRegistry));
+    const current = currentOwnedTools(ctx);
     const lines = [
       `pstack: ${state.active ? "active" : "inactive"}${state.poteto ? " (poteto mode)" : ""}`,
-      `tools: ${[...ownedTools].join(", ") || "(none)"}`,
+      `tools: ${[...current].join(", ") || "(none)"}`,
       `config: ${modelsRulePath(home)}`,
       formatReport(report),
     ];
@@ -456,9 +501,13 @@ export function runConfigTool(
   if (!params.budget || !isBudgetName(params.budget)) {
     throw new Error(`pstack_config write needs \`budget\`, one of: ${Object.keys(BUDGETS).join(", ")}.`);
   }
-  const report = validateRoles(params.roles, lookup);
+  const mapped = applyBudget(params.roles, params.budget, lookup);
+  const report = validateRoles(mapped.roles, lookup);
+  if (mapped.needsChoice.length) {
+    throw new Error(`Config not written (${path}): budget mapping needs a choice for ${mapped.needsChoice.map((n) => `${n.role} (${n.reason})`).join(", ")}.\n${formatReport(report)}`);
+  }
   if (!report.ok) throw new Error(`Config not written (${path}).\n${formatReport(report)}`);
-  writeModelsRule(home, serializeModelsRule(params.roles, params.budget));
+  writeModelsRule(home, serializeModelsRule(mapped.roles, params.budget));
   const written = validateConfigText(readModelsRule(home), lookup);
   return { text: `Wrote ${path}\n${formatReport({ ...written, warnings: [...report.warnings, ...written.warnings] })}`, details: { path, report: written } };
 }

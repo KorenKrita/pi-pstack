@@ -51,8 +51,12 @@ ENDS='[.[] | select(.type=="tool_execution_end")]'
 
 check "no pstack tools before activation (first system message)" \
 	"($SETS | .[0]) as \$s | ($OWN | all(. as \$t | \$s | index(\$t) | not))" "$F"
-check "pstack tools present after /skill:how" \
-	"($SETS | last) as \$s | ($OWN | all(. as \$t | \$s | index(\$t)))" "$F"
+# Tool set in effect when the /skill:how turn's Task call ran: the last system message before that call.
+check "pstack tools present for the /skill:how turn (before its Task call)" \
+	"([.[] | select((.type==\"message_start\" and .message.role==\"system\") or (.type==\"tool_execution_start\" and .toolName==\"Task\"))]
+	  | (map(.type==\"tool_execution_start\") | index(true)) as \$i | .[:\$i] | map(.message)
+	  | reduce .[] as \$m ([]; (. + [\$m.toolsAdded[]?.name]) - [\$m.toolsRemoved[]? | if type==\"string\" then . else .name end]))
+	 as \$s | ($OWN | all(. as \$t | \$s | index(\$t)))" "$F"
 # System messages carry section deltas, so check "first seen" rather than "present in the last one".
 SECS='[.[] | select(.type=="message_start" and .message.role=="system") | .message.sections // {} | keys]'
 check "adapter note injected after activation, not before" \
@@ -66,8 +70,11 @@ check "Task without config -> setup error" \
 check "pstack_config write succeeds" \
 	"$ENDS | map(select(.toolName==\"pstack_config\")) | last | (.isError | not) and (.result.content[0].text | startswith(\"Wrote \"))" "$F"
 if [ -f "$PSTACK_HOME/rules/pstack-models.mdc" ]; then echo "PASS  config file written under PSTACK_HOME"; else echo "FAIL  config file written under PSTACK_HOME"; FAIL=1; fi
-check "Task with unknown model -> available-ids error" \
-	"$ENDS | map(select(.toolName==\"Task\")) | last | .isError and (.result.content[0].text | test(\"nosuch/model-x\")) and (.result.content[0].text | contains(\"$MODEL\"))" "$F"
+# Correlate by toolCallId: the Task call whose args named the unknown model.
+check "Task with unknown model -> Unknown model + Available models, not the setup error" \
+	"([.[] | select(.type==\"tool_execution_start\" and .toolName==\"Task\" and .args.model==\"nosuch/model-x\") | .toolCallId]) as \$ids
+	 | (\$ids | length) == 1 and ($ENDS | map(select(.toolCallId == \$ids[0])) | .[0]
+	 | .isError and (.result.content[0].text | (startswith(\"Unknown model \\\"nosuch/model-x\\\"\") and contains(\"Available models\") and contains(\"$MODEL\") and (contains(\"not configured\") | not))))" "$F"
 
 echo "--- tool results"
 jq -c 'select(.type=="tool_execution_end") | {tool: .toolName, isError, text: (.result.content[0].text | .[0:160])}' "$F" | tee "$OUT/summary.txt"

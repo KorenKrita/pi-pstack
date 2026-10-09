@@ -36,11 +36,11 @@ Input is read from the git tree at the pinned commit (`git ls-tree` / `git cat-f
 
 ## Adaptation rules
 
-Applied in order to every vendored text file (binary files are copied verbatim). URLs (`http(s)://...`) are never rewritten. Model slugs (`claude-opus-5-5-max`, `gpt-5.6-sol-max`, `grok-4.7-xhigh-fast`, ...) in skill prose (the "if the rule or line is missing, use …" defaults) are never rewritten; in Pi the rule is required (the Task gate rejects a missing or invalid config), so those fallbacks are not reached. setup-pstack's own default table is replaced (rules 16–23). Hits are at the pinned commit.
+Applied in order to every vendored text file (binary files are copied verbatim). URLs (`http(s)://...`) are never rewritten. Model defaults in setup-pstack, arena, swarm, and interrogate are adapted to Pi ids and the shared `pstack_config` tool (rules 16–27); other upstream prose is left alone. Hits are at the pinned commit.
 
 | # | id | Find | Replace | Scope | Hits | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `rules-dir` | `~/.cursor/rules/` | `~/.pi/pstack/rules/` | all | 7 | `pstack-models.mdc` (written by `setup-pstack`, read by arena/interrogate/swarm) lives in a pstack-owned dir the extension loads. |
+| 1 | `rules-dir` | `~/.cursor/rules/` | `~/.pi/pstack/rules/` | all | 7 | Intermediate rewrite before the file-scoped setup/read rules; the extension loads `$PSTACK_HOME/rules/*.mdc`. |
 | 2 | `recall-transcript-layout` | recall's sentence describing `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl` and its slug format | Pi layout `~/.pi/agent/sessions/<slug>/<timestamp>_<uuid>.jsonl`, slug `--Users-you-proj--`, Pi session JSONL entries | `skills/recall/SKILL.md` | 1 | Pi's slug is `--` + cwd without leading slash, `/\:` → `-`, + `--` (`session-manager.js`). |
 | 3 | `worktree-audit-session-dirs` | comment + `slug=` + `transcripts=` block | `session_dir()` helper computing `~/.pi/agent/sessions/--<path, / and : → ->--`, plus `main_sessions` | `worktree-audit.sh` | 1 | Pi keys sessions by the cwd pi was launched in (`session-manager.js`). |
 | 4 | `worktree-audit-scan` | the `if [ -d "$transcripts" ]` / `rg ... "$transcripts"` lines | scan both the main worktree's session dir and the candidate `$wt`'s own session dir | `worktree-audit.sh` | 1 | Chats launched inside a worktree live in that worktree's dir; chats launched in the main repo that operate on it live in the main dir. No global scan across unrelated projects. Covered by `tests/worktree-audit.test.ts`. |
@@ -59,11 +59,15 @@ Applied in order to every vendored text file (binary files are copied verbatim).
 | 16 | `setup-intro` | setup-pstack's opening "Write `~/.pi/pstack/rules/pstack-models.mdc` …" | `$PSTACK_HOME/rules/pstack-models.mdc` (default `~/.pi/pstack/…`) written through `pstack_config` | `skills/setup-pstack/SKILL.md` | 1 | Single config path (`PSTACK_HOME`); the model never picks the path. |
 | 17 | `setup-detect-models` | step 1 "Enumerate the model slugs you can pass to a `Task` subagent …" | use the adapter note's candidate list (configured credentials + supported thinking levels); Pi ids `provider/id[:level]`; empty → ask the user to configure a provider | same | 1 | Pi has no Task-probe; the extension lists models in the system prompt. |
 | 18 | `setup-load-state` | step 2 "The default role-to-model mapping …" | read via `pstack_config read`; no config → every role needs a choice | same | 1 | Upstream defaults are Cursor slugs (`claude-opus-5-5-max`, …), not Pi ids; no machine-specific mapping and no silent `inherit-parent`. |
-| 19 | `setup-apply-budget` | step 3b effort-token ladder on slugs | budget sets the `:<thinking>` suffix: highest supported level ≤ target (`unlimited` = entry's own, default `max`); none → needs a choice | same | 1 | Pi thinking levels; mirrors `applyBudgetToValue` in `extensions/pstack/config.ts`. |
+| 19 | `setup-apply-budget` | step 3b effort-token ladder on slugs | budget sets the `:<thinking>` suffix: highest supported level ≤ target (`unlimited` = entry's own, default `max`); none → needs a choice; confirm the final mapped table | same | 1 | Pi thinking levels; `pstack_config write` applies the same mapping and refuses unresolved entries. |
 | 20 | `setup-confirm-roles` | step 3c "Show every role …" | full table; resolve needs-a-choice per role or per group (code / judgment+prose / reflect tooling / panels), edit panel membership, confirm | same | 1 | Every role starts unset in Pi, so grouping keeps setup short. |
 | 21 | `setup-validate` | step 4 "Every real slug written must be in the detected set …" | `pstack_config write` validates (roles present, panels non-empty, model exists with credentials and level) and writes nothing on failure | same | 1 | Same validator as the Task gate. |
 | 22 | `setup-write-rule` | step 5 "Write … Shape:" + the slug-filled code block | call `pstack_config write {budget, roles}`; shape shows `<provider>/<id>:<level>` placeholders | same | 1 | The tool serializes the upstream shape; `tests/config.test.ts` checks the shape's role list and header equal `serializeModelsRule`. |
 | 23 | `setup-applies-when` | step 6 "applies to new sessions" | applies from the next turn | same | 1 | The extension re-reads always-apply rules every turn. |
+| 24 | `arena-runner-config` | arena Phase A runner selection + Cursor slug fallbacks | `pstack_config read` from active home; missing/invalid → setup; Pi ids only | `skills/arena/SKILL.md` | 1 | No hard-coded default-home read or invalid slug fallback. |
+| 25 | `arena-judge-config` | arena Phase C cross-judge selection + Cursor slug fallbacks | use validated cross-judge list from Phase A | same | 1 | Shares the same config snapshot. |
+| 26 | `swarm-worker-config` | swarm Phase A worker selection + Cursor slug fallback | `pstack_config read` from active home; missing/invalid → setup; Pi ids only | `skills/swarm/SKILL.md` | 1 | No hard-coded default-home read. |
+| 27 | `interrogate-reviewer-config` | reviewer panel + Cursor default table and fallback | `pstack_config read`; one reviewer per configured Pi id | `skills/interrogate/SKILL.md` | 1 | No default slug or path silently overrides the user's config. |
 | – | `frontmatter-name` | SKILL.md `name:` not a valid Pi name | normalized (`Poteto Mode` → `poteto-mode`) | `SKILL.md` | 1 | Pi requires `[a-z0-9-]`, ≤64, equal to the dir name. Other keys (`disable-model-invocation`, `mode`, `reminder`, `icon`, `color`, `paths`) are untouched for the extension. Agent files keep their display names (`Comment Sicko`), since skills route by that `subagent_type`. |
 
 `bun run check` scans every non-binary generated file (binary = contains a NUL byte) with URLs masked out, and fails on any remaining `~/.cursor`, `$HOME/.cursor`, or `.cursor/` path segment (bare, `./`, `../`, `<dir>/`) unless allowlisted in `CURSOR_ALLOWLIST` (`scripts/rules.ts`):
@@ -84,13 +88,13 @@ It also validates skill names/descriptions and that every skill reference resolv
 
 ## Cursor built-ins and the extension
 
-Skill text is left as-is except for setup-pstack (rules 16–23). The extension (`extensions/pstack/index.ts`, pure logic in `config.ts` / `rules.ts`) provides or approximates these:
+Skill text is left as-is except for setup-pstack and the per-role readers (rules 16–27). The extension (`extensions/pstack/index.ts`, pure logic in `config.ts` / `rules.ts`) provides or approximates these:
 
 | Built-in | Status in Pi |
 | --- | --- |
 | **AskQuestion** tool | Provided. Cursor's schema is not public, so this is a plugin contract: `{ title?, questions: [{ id, prompt, options: [{ id, label }], allow_multiple? }] }` via `ctx.ui.select`; returns selected ids+labels per question, an explicit cancelled result, or (no UI) an error telling the model to ask in plain text. |
 | **Task** tool | Schema (`description`, `prompt`, `subagent_type`, `model`, `readonly`, `run_in_background`, `resume`, `environment`), config gate, and model resolution provided. Execution is **pending (Step 3)**: a valid call returns "Task execution is not implemented yet (pi-pstack Step 3)". |
-| **setup-pstack writes** | Provided via the `pstack_config` tool (`read` → parsed config + validation report; `write` → validate, atomic write in upstream `.mdc` shape). |
+| **setup-pstack writes** | Provided via the `pstack_config` tool (`read` → parsed config + validation report; `write` → apply budget, reject unresolved entries, validate, atomic write in upstream `.mdc` shape). Arena, swarm, and interrogate also read through this tool so `PSTACK_HOME` is consistent. |
 | **`~/.pi/pstack/rules/*.mdc` always-applied rules** | Provided: bodies of `$PSTACK_HOME/rules/*.mdc` with `alwaysApply: true` are injected every turn while pstack is active; malformed frontmatter is skipped with a warning. |
 | **Session path in system prompt** | Provided in the adapter note (session dir + current session file). |
 | **Skill frontmatter `mode` / `reminder`** | Provided: poteto-mode's reminder plus an explicit autonomy grant, only while poteto mode is on (`/poteto-mode`). |
@@ -119,7 +123,7 @@ Where upstream used these built-ins (for reference):
 | **Bugbot** (Cursor PR reviewer bot) | `poteto-mode/SKILL.md`, `poteto-mode/references/bugbot-triage.md`, `poteto-mode/playbooks/{autopilot-full,autopilot-stack,babysit,multi-phase-plan}.md`, `reflect/references/synthesizer.md`, `poteto-mode/scripts/watch-pr/github.ts` |
 | **Cloud agents / dashboard / restart semantics** | `poteto-mode/SKILL.md`, `poteto-mode/playbooks/{orchestrate,autopilot-full,autopilot-stack,shipping}.md` |
 | **Skill frontmatter semantics** `mode`, `reminder`, `icon`, `color` (poteto-mode), `paths` (typescript-best-practices) | respective `SKILL.md` |
-| **`~/.pi/pstack/rules/*.mdc` always-applied rules** (`pstack-models.mdc`) | `setup-pstack` (writes), `arena`, `interrogate`, `swarm` (read) |
+| **`$PSTACK_HOME/rules/*.mdc` always-applied rules** (`pstack-models.mdc`) | `setup-pstack` (writes through `pstack_config`), `arena`, `interrogate`, `swarm` (read through `pstack_config`) |
 
 ## Attribution
 

@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
+import { loadAlwaysApplyRules } from "../extensions/pstack/rules";
 import { ROLES, TASK_NOT_IMPLEMENTED, modelsRulePath } from "../extensions/pstack/config";
 import {
   POTETO_GRANT,
@@ -45,6 +48,8 @@ interface FakeOptions {
 function makePi(opts: FakeOptions = {}) {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, any>();
+  const lateTools = new Map<string, any>();
+  const ownExtensionPath = fileURLToPath(new URL("../extensions/pstack/index.ts", import.meta.url));
   const commands = new Map<string, any>();
   let active = ["read", "bash", ...(opts.otherTools ?? [])];
   const branch: { type: string; customType?: string; data?: unknown }[] = [];
@@ -66,7 +71,12 @@ function makePi(opts: FakeOptions = {}) {
       if (tool.defaultActive !== false) active.push(tool.name);
     },
     registerCommand: (name: string, options: any) => commands.set(name, options),
-    getAllTools: () => [...(opts.otherTools ?? []).map((name) => ({ name })), ...[...tools.keys()].map((name) => ({ name }))],
+    getAllTools: () => [
+      ...(opts.otherTools ?? []).map((name) => ({ name, sourceInfo: { path: "/other/ext.ts" } })),
+      ...[...tools.keys()].map((name) => ({ name, sourceInfo: { path: ownExtensionPath } })),
+
+      ...[...lateTools.keys()].map((name) => ({ name, sourceInfo: { path: "/other/late.ts" } })),
+    ].filter((tool) => !lateTools.has(tool.name) || tool.sourceInfo.path === "/other/late.ts"),
     getActiveTools: () => [...active],
     setActiveTools: (names: string[]) => {
       active = [...names];
@@ -106,7 +116,7 @@ function makePi(opts: FakeOptions = {}) {
   };
 
   pstackExtension(pi, { skillsDir: opts.skillsDir ?? REPO_SKILLS });
-  return { pi, ctx, tools, commands, branch, sent, notes, emit, turn, active: () => active };
+  return { pi, ctx, tools, lateTools, commands, branch, sent, notes, emit, turn, active: () => active };
 }
 
 let home: string;
@@ -183,6 +193,20 @@ describe("activation (R1)", () => {
     expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
   });
 
+  test("an own SKILL.md symlinked to a file outside the package does not count as own", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pkg-escape-"));
+    const outside = join(root, "outside.md");
+    writeFileSync(outside, "---\nname: how\ndescription: x\n---\nbody\n");
+    const skillsDir = join(root, "skills");
+    mkdirSync(join(skillsDir, "how"), { recursive: true });
+    symlinkSync(outside, join(skillsDir, "how/SKILL.md"));
+    const f = makePi({ skillsDir });
+    await f.emit("session_start", { reason: "startup" });
+    await f.emit("tool_result", { toolName: "read", input: { path: outside }, content: [], isError: false });
+    await f.emit("tool_result", { toolName: "read", input: { path: join(skillsDir, "how/SKILL.md") }, content: [], isError: false });
+    expect(f.branch).toEqual([]);
+  });
+
   test("state follows the branch on session_tree / session_start", async () => {
     const f = makePi();
     await f.emit("session_start", { reason: "startup" });
@@ -250,6 +274,29 @@ describe("/pstack and collisions", () => {
     expect(f.active()).toEqual(["read", "bash", "Task"]);
     await f.commands.get("pstack").handler("status", f.ctx);
     expect(f.notes.at(-1)?.message).toContain("tool collisions (not provided): Task");
+  });
+
+  test("repeated /pstack on re-applies the tool set even when state is unchanged", async () => {
+    const f = makePi();
+    await f.emit("session_start", { reason: "startup" });
+    await f.commands.get("pstack").handler("on", f.ctx);
+    const entries = f.branch.length;
+    f.pi.setActiveTools(f.active().filter((n: string) => n !== "Task"));
+    await f.commands.get("pstack").handler("on", f.ctx);
+    expect(f.active()).toContain("Task");
+    expect(f.branch.length).toBe(entries);
+  });
+
+  test("late tool takeover is not disabled by /pstack off and is reported", async () => {
+    const f = makePi();
+    await f.emit("session_start", { reason: "startup" });
+    await f.commands.get("pstack").handler("on", f.ctx);
+    f.lateTools.set("Task", {});
+    await f.commands.get("pstack").handler("off", f.ctx);
+    expect(f.active()).toContain("Task");
+    await f.commands.get("pstack").handler("status", f.ctx);
+    expect(f.notes.at(-1)?.message).toContain("tool collisions (not provided): Task");
+    expect(f.notes.some((n) => n.type === "warning" && n.message.includes('"Task"'))).toBe(true);
   });
 
   test("command collision: existing /how is not overridden; status reports it", async () => {
@@ -332,6 +379,30 @@ describe("per-turn injection (R3)", () => {
     const mode = sections.pstack_mode as string;
     expect(mode.indexOf(POTETO_REMINDER)).toBe(0);
     expect(mode.indexOf(POTETO_GRANT)).toBeGreaterThan(0);
+  });
+
+  test("same-run requests reflect read activation and off without another before_agent_start", async () => {
+    writeRule("a.mdc", "---\nalwaysApply: true\n---\nRULE A\n");
+    const f = makePi();
+    await f.emit("session_start", { reason: "startup" });
+    const initial = { role: "system", content: "", sections: { preamble: "base", other: "keep" }, timestamp: 0 };
+    const request = async (messages: any[]) => {
+      const event = await f.emit("context_with_system", { messages });
+      return event?.messages ?? messages;
+    };
+    const untouched = await request([initial]);
+    expect(getCurrentSystemMessage(untouched)?.sections).toEqual(initial.sections);
+    await f.emit("tool_result", { toolName: "read", input: { path: join(REPO_SKILLS, "how/SKILL.md") }, isError: false });
+    const activated = await request(untouched);
+    expect(getCurrentSystemMessage(activated)?.sections?.pstack_adapter).toContain("pstack skills");
+    expect(getCurrentSystemMessage(activated)?.sections?.pstack_rules).toContain("RULE A");
+    expect(getCurrentSystemMessage(activated)?.sections?.other).toBe("keep");
+    await f.emit("input", { text: "/skill:poteto-mode" });
+    const poteto = await request(activated);
+    expect(getCurrentSystemMessage(poteto)?.sections?.pstack_mode).toContain(POTETO_GRANT);
+    await f.commands.get("pstack").handler("off", f.ctx);
+    const disabled = await request(poteto);
+    expect(getCurrentSystemMessage(disabled)?.sections).toEqual(initial.sections);
   });
 
   test("inactive: nothing injected, no path hints recorded", async () => {
@@ -450,6 +521,25 @@ describe("pstack_config (R5) and Task (R7)", () => {
     expect(read.text).toContain("Validation: ok");
   });
 
+  test("write maps the chosen budget before serializing, including panel entries", () => {
+    const roles = fullRoles("anthropic/opus:max");
+    roles["bug-fix"] = "local/plain";
+    const res = runConfigTool({ action: "write", roles, budget: "small" }, ctx);
+    expect(res.text).toContain("Validation: ok");
+    const file = readFileSync(modelsRulePath(home), "utf8");
+    expect(file).toContain("bug-fix: local/plain\n");
+    expect(file).toContain("feature, refactoring: anthropic/opus:medium\n");
+    expect(file).toContain("arena runners: anthropic/opus:medium, auto\n");
+    expect((runConfigTool({ action: "read" }, ctx).details as any).roles["bug-fix"]).toBe("local/plain");
+  });
+
+  test("write refuses unmappable budget entries and preserves the prior file", () => {
+    runConfigTool({ action: "write", roles: fullRoles("auto"), budget: "small" }, ctx);
+    const before = readFileSync(modelsRulePath(home), "utf8");
+    expect(() => runConfigTool({ action: "write", roles: fullRoles("gone/model"), budget: "small" }, ctx)).toThrow(/needs a choice.*feature, refactoring/s);
+    expect(readFileSync(modelsRulePath(home), "utf8")).toBe(before);
+  });
+
   test("invalid write is rejected and leaves the existing file untouched", () => {
     runConfigTool({ action: "write", roles: fullRoles("auto"), budget: "small" }, ctx);
     const before = readFileSync(modelsRulePath(home), "utf8");
@@ -459,6 +549,23 @@ describe("pstack_config (R5) and Task (R7)", () => {
     expect(() => runConfigTool({ action: "write", roles: bad, budget: "small" }, ctx)).toThrow(/missing role "swarm workers"/);
     expect(() => runConfigTool({ action: "write", roles: fullRoles("auto"), budget: "huge" }, ctx)).toThrow(/budget/);
     expect(readFileSync(modelsRulePath(home), "utf8")).toBe(before);
+  });
+
+  test("Task gate and rule loader agree on malformed, duplicate and commented YAML", async () => {
+    const f = makePi();
+    await f.emit("session_start", { reason: "startup" });
+    runConfigTool({ action: "write", roles: fullRoles("auto"), budget: "small" }, ctx);
+    const path = modelsRulePath(home);
+    const good = readFileSync(path, "utf8");
+    const task = () => f.tools.get("Task").execute("id", { description: "d", prompt: "p" }, undefined, undefined, f.ctx);
+    for (const text of [good.replace("alwaysApply: true", "alwaysApply: ["), good.replace("alwaysApply: true", "alwaysApply: true\nalwaysApply: false")]) {
+      writeFileSync(path, text);
+      expect(loadAlwaysApplyRules(join(home, "rules")).rules).toEqual([]);
+      await expect(task()).rejects.toThrow(/pstack is not configured/);
+    }
+    writeFileSync(path, good.replace("alwaysApply: true", "alwaysApply: true # enabled"));
+    expect(loadAlwaysApplyRules(join(home, "rules")).rules).toHaveLength(1);
+    await expect(task()).rejects.toThrow(TASK_NOT_IMPLEMENTED);
   });
 
   test("Task: not configured → setup error; unknown model → available ids; valid → not implemented", async () => {

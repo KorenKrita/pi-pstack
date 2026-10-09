@@ -111,8 +111,14 @@ describe("budget mapping", () => {
 
   test("no supported level at or below target → needs a choice", () => {
     const minOnly: ModelLookup = { find: () => ({ hasAuth: true, levels: ["off", "high", "max"] }), availableIds: () => [] };
-    const r = applyBudgetToValue("x/y", "small", minOnly);
-    expect(r.ok).toBe(false);
+    expect(applyBudgetToValue("x/y", "small", minOnly)).toEqual({ ok: true, value: "x/y:off" });
+    const noOff: ModelLookup = { find: () => ({ hasAuth: true, levels: ["high", "max"] }), availableIds: () => [] };
+    expect(applyBudgetToValue("x/y", "small", noOff).ok).toBe(false);
+  });
+
+  test("explicit :off on a reasoning model is kept under any budget", () => {
+    expect(applyBudgetToValue("anthropic/opus:off", "unlimited", lookup)).toEqual({ ok: true, value: "anthropic/opus:off" });
+    expect(applyBudgetToValue("anthropic/opus:off", "small", lookup)).toEqual({ ok: true, value: "anthropic/opus:off" });
   });
 
   test("applyBudget maps panels and marks unmappable roles", () => {
@@ -152,6 +158,15 @@ describe("validation", () => {
     expect(all).toContain('"nokey/model" has no configured credentials');
     expect(all).toContain("Supported levels: off, minimal, low, medium, high.");
     expect(report.warnings).toEqual(['unknown role "how critics"']);
+  });
+
+  test("frontmatter uses rule loader semantics for malformed, duplicate and commented YAML", () => {
+    const good = serializeModelsRule(validRoles(), "medium");
+    for (const text of [good.replace("alwaysApply: true", "alwaysApply: ["), good.replace("alwaysApply: true", "alwaysApply: true\nalwaysApply: false")]) {
+      expect(validateConfigText(text, lookup).ok).toBe(false);
+    }
+    const commented = good.replace("alwaysApply: true", "alwaysApply: true # enabled");
+    expect(validateConfigText(commented, lookup).ok).toBe(true);
   });
 
   test("text: missing file, unknown lines, duplicates, alwaysApply", () => {
@@ -265,6 +280,15 @@ describe("generated setup-pstack text (R5)", () => {
     expect(Object.keys(parsed.roles)).toEqual(ROLES.map((r) => r.name));
     const header = serializeModelsRule({}, "unlimited").trimEnd();
     expect(shape.startsWith(header)).toBe(true);
+  });
+
+  test("arena, swarm, interrogate read config through pstack_config, not the default home", () => {
+    for (const name of ["arena", "swarm", "interrogate"]) {
+      const skill = readFileSync(join(import.meta.dir, `../skills/${name}/SKILL.md`), "utf8");
+      expect(skill).toContain('`pstack_config` with `action: "read"`');
+      expect(skill).not.toContain("~/.pi/pstack/rules/pstack-models.mdc");
+      expect(skill).not.toMatch(/claude-opus-5-5-max|gpt-5\.6-sol-max|grok-4\.7-xhigh-fast/);
+    }
   });
 
   test("no upstream Cursor slugs as defaults; writes go through pstack_config", () => {

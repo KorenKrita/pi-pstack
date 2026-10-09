@@ -9,8 +9,8 @@ export interface AlwaysApplyRule {
   body: string;
 }
 
-/** Parse one .mdc rule. Returns the body when `alwaysApply: true`, null when not always-apply; throws on malformed frontmatter. */
-export function parseAlwaysApplyRule(text: string): string | null {
+/** The same strict YAML/frontmatter semantics apply to injected rules and the Task config gate. */
+export function parseRuleFrontmatter(text: string): { frontmatter: Record<string, unknown>; body: string } {
   const normalized = text.replace(/\r\n?/g, "\n");
   if (!normalized.startsWith("---\n") || normalized.indexOf("\n---", 3) === -1) {
     throw new Error("missing frontmatter");
@@ -19,6 +19,12 @@ export function parseAlwaysApplyRule(text: string): string | null {
   if (typeof frontmatter !== "object" || frontmatter === null || Array.isArray(frontmatter)) {
     throw new Error("frontmatter is not a mapping");
   }
+  return { frontmatter, body };
+}
+
+/** Parse one .mdc rule. Returns the body when `alwaysApply: true`, null when not always-apply; throws on malformed frontmatter. */
+export function parseAlwaysApplyRule(text: string): string | null {
+  const { frontmatter, body } = parseRuleFrontmatter(text);
   return frontmatter.alwaysApply === true ? body : null;
 }
 

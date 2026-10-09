@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { parseRuleFrontmatter } from "./rules";
 
 // ---------- R4: single config path ----------
 
@@ -185,9 +186,10 @@ export function applyBudgetToValue(
   if (!found.hasAuth) return { ok: false, reason: `model "${name}" has no configured credentials` };
   const reasoning = found.levels.filter((l) => l !== "off");
   if (reasoning.length === 0) return { ok: true, value: name };
+  if (ref.level === "off" && found.levels.includes("off")) return { ok: true, value: `${name}:off` };
   const target: ModelThinkingLevel = budget === "unlimited" ? (ref.level ?? "max") : BUDGETS[budget].target;
   const targetIndex = THINKING_LEVELS.indexOf(target);
-  const best = [...reasoning].reverse().find((l) => THINKING_LEVELS.indexOf(l) <= targetIndex);
+  const best = [...found.levels].reverse().find((l) => THINKING_LEVELS.indexOf(l) <= targetIndex);
   if (!best) return { ok: false, reason: `model "${name}" supports no thinking level at or below "${target}"` };
   return { ok: true, value: `${name}:${best}` };
 }
@@ -228,21 +230,25 @@ export interface ParsedConfig {
   /** Lines that are neither comments, a known role, nor blank — e.g. retired roles like `how critics`. */
   unknownLines: string[];
   duplicateRoles: string[];
+  frontmatterError?: string;
 }
 
 export function parseModelsRule(text: string): ParsedConfig {
   const normalized = text.replace(/\r\n?/g, "\n");
   let body = normalized;
   let alwaysApply = false;
-  if (normalized.startsWith("---\n")) {
-    const end = normalized.indexOf("\n---", 3);
-    if (end !== -1) {
-      const front = normalized.slice(4, end);
-      alwaysApply = /^alwaysApply:\s*true\s*$/m.test(front);
-      body = normalized.slice(normalized.indexOf("\n", end + 1) + 1);
-    }
+  let frontmatterError: string | undefined;
+  try {
+    const parsed = parseRuleFrontmatter(normalized);
+    alwaysApply = parsed.frontmatter.alwaysApply === true;
+    body = parsed.body;
+  } catch (error) {
+    frontmatterError = (error as Error).message;
+    // Do not parse a malformed header as role lines; validation reports the YAML error.
+    body = "";
   }
   const parsed: ParsedConfig = { alwaysApply, roles: {}, unknownLines: [], duplicateRoles: [] };
+  if (frontmatterError) parsed.frontmatterError = frontmatterError;
   for (const rawLine of body.split("\n")) {
     const line = rawLine.trim();
     if (!line) continue;
@@ -329,7 +335,8 @@ export function validateConfigText(text: string | undefined, lookup: ModelLookup
   if (text === undefined) return { ok: false, errors: ["config file does not exist"], warnings: [] };
   const parsed = parseModelsRule(text);
   const report = validateRoles(parsed.roles, lookup);
-  if (!parsed.alwaysApply) report.errors.unshift("frontmatter must set alwaysApply: true");
+  if (parsed.frontmatterError) report.errors.unshift(`invalid frontmatter: ${parsed.frontmatterError}`);
+  else if (!parsed.alwaysApply) report.errors.unshift("frontmatter must set alwaysApply: true");
   if (!parsed.budget) report.warnings.push("no `# budget: <name> (<level>)` line");
   else if (!isBudgetName(parsed.budget.name)) report.warnings.push(`unknown budget "${parsed.budget.name}"`);
   for (const role of parsed.duplicateRoles) report.errors.push(`role "${role}" appears more than once`);

@@ -33,20 +33,18 @@ Write one clear paragraph. If you're unsure about the intent, ask the user befor
 
 ## Step 3, Spawn Reviewers
 
-Launch all reviewers in a single message using the Task tool. Use the `interrogate reviewers` line in `~/.pi/pstack/rules/pstack-models.mdc`, one reviewer per entry, extending or shrinking the Reviewer A/B/C labels below to the configured entry count. If the rule or that line is missing, use the table defaults.
+Call `pstack_config` with `action: "read"` and use its `interrogate reviewers` list only when validation is ok. The tool reads the active `$PSTACK_HOME` (or default) path; never read a fixed path. If missing or invalid, ask the user to run /setup-pstack and stop. Launch one reviewer per configured entry in a single message using Task, extending or shrinking the Reviewer A/B/C labels below to that count. The table is an illustration, not default model choices; only the configured Pi ids are valid.
 
-| Subagent | Default model |
-|----------|---------------|
-| Reviewer A | `claude-opus-5-5-max` |
-| Reviewer B | `gpt-5.6-sol-max` |
-| Reviewer C | `grok-4.7-xhigh-fast` |
+| Subagent | Configured model |
+|----------|------------------|
+| Reviewer A/B/C (as many as configured) | Corresponding `interrogate reviewers` entry |
 
 For each reviewer:
 - `subagent_type`: `generalPurpose`
-- `model`: the configured `interrogate reviewers` entry, or the table default with no configured line. For an `auto` or `inherit-parent` entry, omit `model` so that reviewer runs on the parent model.
+- `model`: the configured Pi model id; for `auto` or `inherit-parent`, omit `model` so the reviewer uses the parent model.
 - `readonly`: `true`
 
-If the Task tool rejects a configured entry, run that reviewer on the table default of its family and say so. Families go by prefix: `claude-*`, `gpt-*`, and `grok-*`. With no family match, use Reviewer A's default. If it rejects a table default, check the valid slugs in the Task tool's error message, pick the closest equivalent (prefer the highest-reasoning tier of the same family), spawn with it, and open a separate PR to update the default table. Do not block the review on the slug issue. Never treat an alias entry as a rejected slug or apply either fallback to it.
+If Task rejects an entry, show its error and ask for a valid Pi model id. Do not guess a Cursor slug or treat an alias as a rejected model.
 
 Read `references/reviewer-prompt.md` and fill in the template with:
 1. The stated intent
