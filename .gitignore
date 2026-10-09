@@ -1,3 +1,4 @@
 node_modules/
 .upstream-cache/
 *.log
+.DS_Store
