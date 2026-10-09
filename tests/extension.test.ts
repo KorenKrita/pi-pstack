@@ -40,6 +40,8 @@ function fakeRegistry(models: Model[] = MODELS) {
 interface FakeOptions {
   /** Tools/commands registered by other extensions before pstack. */
   otherTools?: string[];
+  /** Registered but `exposure: "hidden"` (Pi's disabled server / hidden tool re-registration). */
+  hiddenTools?: string[];
   otherCommands?: string[];
   /** Skill commands as Pi's resource loader reports them: name → SKILL.md path. */
   skillCommands?: Record<string, string>;
@@ -75,6 +77,7 @@ function makePi(opts: FakeOptions = {}) {
     registerCommand: (name: string, options: any) => commands.set(name, options),
     getAllTools: () => [
       ...(opts.otherTools ?? []).map((name) => ({ name, sourceInfo: { path: "/other/ext.ts" } })),
+      ...(opts.hiddenTools ?? []).map((name) => ({ name, exposure: "hidden", sourceInfo: { path: "builtin:mcp" } })),
       ...[...tools.keys()].map((name) => ({ name, sourceInfo: { path: ownExtensionPath } })),
 
       ...[...lateTools.keys()].map((name) => ({ name, sourceInfo: { path: "/other/late.ts" } })),
@@ -106,6 +109,7 @@ function makePi(opts: FakeOptions = {}) {
       getSessionFile: () => "/sessions/--work--/s.jsonl",
     },
     isIdle: () => true,
+    isProjectTrusted: () => false,
   };
 
   const emit = async (event: string, payload: any = {}) => {
@@ -159,6 +163,21 @@ describe("activation (R1)", () => {
     await f.emit("session_start", { reason: "startup" });
     await f.emit("input", { text: "/skill:poteto-mode", source: "interactive" });
     expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: true });
+  });
+
+  test("review 5.2: in a Task child, /poteto-mode and /skill:poteto-mode (model-authored stdin) do not grant poteto", async () => {
+    process.env.PSTACK_TASK_ID = "tchild";
+    try {
+      const f = makePi();
+      await f.emit("session_start", { reason: "startup" });
+      await f.emit("input", { text: "/skill:poteto-mode do the job", source: "interactive" });
+      expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
+      await f.commands.get("poteto-mode").handler("do the job", f.ctx);
+      expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
+      expect(f.notes.some((n) => /inside a Task is model-authored/.test(n.message))).toBe(true);
+    } finally {
+      delete process.env.PSTACK_TASK_ID;
+    }
   });
 
   test("a same-named skill from another package does not activate", async () => {
@@ -372,7 +391,7 @@ describe("per-turn injection (R3)", () => {
     expect(adapter).toContain(`Agent store (Cursor's per-workspace store; orchestrate/, docs/): ${join(home, "projects")}/--`);
     expect(adapter).toMatch(/bun \S+\/skills\/poteto-mode\/scripts\/orch\/orch\.ts --store/);
     expect(adapter).toContain("GoalSet/GoalDone");
-    expect(adapter).toContain("MCP servers connected now: none.");
+    expect(adapter).toContain("MCP servers with reachable tools now: none.");
     expect(adapter).toContain("this package's `create-skill` skill");
 
     // Path hints fire once per session.
@@ -622,5 +641,16 @@ describe("MCP inventory (Cursor mcps/ map)", () => {
     expect(adapter).toContain("  - docs: 2 tool(s) (search, fetch)");
     expect(adapter).toContain("  - jira: 1 tool(s) (get_issue)");
     expect(adapter).not.toContain("web_search");
+  });
+
+  test("review 5.4: hidden tools (disabled server, hidden tool) are not listed", async () => {
+    const f = makePi({ otherTools: ["mcp__docs__search"], hiddenTools: ["mcp__disabled__secret_tool", "mcp__docs__delete_all"] });
+    await f.emit("session_start", { reason: "startup" });
+    await f.commands.get("pstack").handler("on", f.ctx);
+    const adapter = (await f.turn()).pstack_adapter as string;
+    expect(adapter).toContain("  - docs: 1 tool(s) (search)");
+    expect(adapter).not.toContain("disabled");
+    expect(adapter).not.toContain("secret_tool");
+    expect(adapter).not.toContain("delete_all");
   });
 });

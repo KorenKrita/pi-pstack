@@ -44,6 +44,10 @@ export interface TaskMeta {
   cwd: string;
   worktree?: { path: string; branch: string };
   environmentNote?: string;
+  /** The parent's project-trust decision when the task was created (ctx.isProjectTrusted()). The child gets it
+   * as --approve / --no-approve so it loads the same project resources (e.g. `.pi/mcp.json` overrides) as the
+   * parent, including a session-only `--approve` that a noninteractive child could not otherwise see. */
+  projectTrusted?: boolean;
   status: TaskStatus;
   runs: number;
   createdAt: string;
@@ -201,7 +205,8 @@ export function buildChildArgs(home: string, meta: TaskMeta, agent: AgentType, l
   const args = ["--mode", "json", "-p", "--session-dir", join(dir, "session")];
   if (launch.resume) args.push("-c");
   args.push("--no-extensions", "-e", launch.extensionPath);
-  // Agent mode keeps MCP (same servers as the parent, from mcp.json); readonly strips it, as in Cursor.
+  if (meta.projectTrusted !== undefined) args.push(meta.projectTrusted ? "--approve" : "--no-approve");
+  // Agent mode keeps MCP (the parent's mcp.json config under the parent's trust decision); readonly strips it, as in Cursor.
   if (!meta.readonly) for (const b of launch.builtins ?? []) args.push("-e", `builtin:${b}`);
   args.push("--no-context-files", "--no-skills", "--skill", launch.skillsDir);
   if (launch.extraSkillsDir) args.push("--skill", launch.extraSkillsDir);

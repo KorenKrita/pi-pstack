@@ -56,15 +56,20 @@ function makeHost(cwd = tmpdir()) {
   const statuses = new Map<string, string | undefined>();
   let active: string[] = [];
   const branch: any[] = [];
-  const session = { id: "sess-1", idle: true, pending: false };
+  const extraTools: any[] = [];
+  const extraCommands: any[] = [];
+  const session: { id: string; idle: boolean; pending: boolean; trusted?: boolean } = { id: "sess-1", idle: true, pending: false };
   const pi: any = {
     on: (e: string, h: any) => handlers.set(e, [...(handlers.get(e) ?? []), h]),
     registerTool: (t: any) => tools.set(t.name, t),
     registerCommand: (name: string, options: any) => commands.set(name, options),
-    getAllTools: () => [...tools.keys()].map((name) => ({ name, sourceInfo: { path: join(REPO, "extensions/pstack/index.ts") } })),
+    getAllTools: () => [
+      ...[...tools.keys()].map((name) => ({ name, sourceInfo: { path: join(REPO, "extensions/pstack/index.ts") } })),
+      ...extraTools,
+    ],
     getActiveTools: () => [...active],
     setActiveTools: (n: string[]) => (active = [...n]),
-    getCommands: () => [],
+    getCommands: () => extraCommands,
     appendEntry: (customType: string, data: unknown) => branch.push({ type: "custom", customType, data }),
     sendUserMessage: (text: string, options: any) => sentUser.push({ text, options }),
     sendMessage: (message: any, options: any) => {
@@ -86,6 +91,7 @@ function makeHost(cwd = tmpdir()) {
     },
     sessionManager: { getSessionId: () => session.id, getBranch: () => branch, getSessionDir: () => "/s", getSessionFile: () => undefined },
     isIdle: () => session.idle,
+    isProjectTrusted: () => session.trusted ?? false,
     hasPendingMessages: () => session.pending,
   };
   pstackExtension(pi, { skillsDir: SKILLS });
@@ -97,7 +103,7 @@ function makeHost(cwd = tmpdir()) {
   const call = (name: string, params: any, signal?: AbortSignal, onUpdate?: (u: any) => void) =>
     tools.get(name).execute("call-1", params, signal, onUpdate, ctx);
   const command = (name: string, args: string) => commands.get(name).handler(args, ctx);
-  return { tools, commands, ctx, notes, emit, call, command, session, branch, sentMessages, sentUser, statuses, active: () => active };
+  return { tools, commands, ctx, notes, emit, call, command, session, branch, sentMessages, sentUser, statuses, extraTools, extraCommands, active: () => active };
 }
 
 const text = (r: any) => r.content[0].text as string;
@@ -154,6 +160,13 @@ describe("child launch (T1, T2)", () => {
     expect(ro.filter((a) => a.startsWith("builtin:"))).toEqual([]);
   });
 
+  test("review 5.1: the child gets the parent's project-trust decision for this run (same project MCP config)", () => {
+    expect(buildChildArgs("/h", sampleMeta({ projectTrusted: true }), general, launch)).toContain("--approve");
+    const untrusted = buildChildArgs("/h", sampleMeta({ projectTrusted: false }), general, launch);
+    expect(untrusted).toContain("--no-approve");
+    expect(untrusted).not.toContain("--approve");
+  });
+
   test("review 3: readonly removes bash for every agent type", () => {
     for (const agent of BUILTIN_AGENT_TYPES) {
       const args = buildChildArgs("/h", sampleMeta({ readonly: true }), agent, launch);
@@ -195,6 +208,30 @@ describe("Task tool (T3–T8)", () => {
     const seen = JSON.parse(text(r));
     expect(seen.env).toMatchObject({ PSTACK_DEPTH: "1", PSTACK_HOME: home, PSTACK_TASK_ID: r.details.taskId });
     expect(seen.cwd.endsWith(cwd.split("/").pop()!)).toBe(true);
+  });
+
+  test("review 5.1: the parent's trust decision reaches the child (--approve / --no-approve) and survives resume", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    h.session.trusted = true;
+    const r = await h.call("Task", { description: "t", prompt: "args" });
+    expect(JSON.parse(text(r)).args).toContain("--approve");
+    h.session.trusted = false;
+    const u = await h.call("Task", { description: "u", prompt: "args" });
+    expect(JSON.parse(text(u)).args).toContain("--no-approve");
+    const again = await h.call("Task", { description: "t again", prompt: "args", resume: r.details.taskId });
+    expect(JSON.parse(text(again)).args).toContain("--approve");
+  });
+
+  test("review 5.3: builtin:mcp is passed on from its /mcp command before any server has connected", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    h.extraTools.push({ name: "codemode", sourceInfo: { path: "builtin:codemode" } });
+    h.extraCommands.push({ name: "mcp", source: "extension", sourceInfo: { path: "builtin:mcp" } });
+    const r = await h.call("Task", { description: "m", prompt: "args" });
+    const args: string[] = JSON.parse(text(r)).args;
+    expect(args).toContain("builtin:mcp");
+    expect(args).toContain("builtin:codemode");
   });
 
   test("failures are errors, never success: exit code, stopReason error, empty output", async () => {

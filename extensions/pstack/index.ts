@@ -262,26 +262,32 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
 
   const extensionFile = fileURLToPath(import.meta.url);
   const agentTypes = loadAgentTypes(resolve(skillsDir, "../agents"));
-  /** CHILD_BUILTINS the parent itself runs (absent with --no-mcp / -ne), detected from tool sources.
-   * MCP servers connect asynchronously, so this is read at each spawn, not cached at load. */
+  /** CHILD_BUILTINS the parent itself runs (absent with --no-mcp / -ne). builtin:mcp registers its `/mcp`
+   * command at load but its tools only as servers connect, so it is detected from the command source;
+   * codemode is detected from its tool. Read at each spawn. */
   const parentBuiltins = (): string[] => {
-    const loaded = new Set(pi.getAllTools().map((t) => t.sourceInfo?.path).filter((p): p is string => !!p && p.startsWith("builtin:")));
+    const loaded = new Set([
+      ...pi.getAllTools().map((t) => t.sourceInfo?.path),
+      ...pi.getCommands().map((c) => c.sourceInfo?.path),
+    ].filter((p): p is string => !!p && p.startsWith("builtin:")));
     return CHILD_BUILTINS.filter((b) => loaded.has(`builtin:${b}`));
   };
 
-  /** Cursor's `mcps/` directory / available-tools map: the MCP servers and their tools in this session. */
+  /** Cursor's `mcps/` directory / available-tools map: the MCP servers and their reachable tools now. */
   const mcpInventory = (): string[] => {
     const byServer = new Map<string, string[]>();
     for (const t of pi.getAllTools()) {
+      // Pi cannot unregister tools: disabled servers and hidden tools stay registered with `hidden` exposure.
+      if ((t as { exposure?: string }).exposure === "hidden") continue;
       const m = /^mcp__(.+?)__(.+)$/.exec(t.name);
       if (m) byServer.set(m[1]!, [...(byServer.get(m[1]!) ?? []), m[2]!]);
     }
     const header =
-      "- MCP (Cursor's `mcps/` directory / available-tools map): Pi's own MCP client. Tools are named `mcp__<server>__<tool>`; servers marked codemode in the mcp_servers prompt section are called from `codemode` scripts (find them with `searchTools()` / `describeTool()`), deferred ones load with `tool_search`. Agent-mode Tasks get the same servers; `readonly` Tasks get none.";
-    if (!byServer.size) return [header, "- MCP servers connected now: none."];
+      "- MCP (Cursor's `mcps/` directory / available-tools map): Pi's own MCP client. Tools are named `mcp__<server>__<tool>`; servers marked codemode in the mcp_servers prompt section are called from `codemode` scripts (find them with `searchTools()` / `describeTool()`), deferred ones load with `tool_search`. Agent-mode Tasks load the same MCP configuration (same project trust); `readonly` Tasks get none. Servers still connecting are not listed yet.";
+    if (!byServer.size) return [header, "- MCP servers with reachable tools now: none."];
     return [
       header,
-      "- MCP servers connected now:",
+      "- MCP servers with reachable tools now:",
       ...[...byServer].map(([s, tools]) => `  - ${s}: ${tools.length} tool(s) (${tools.slice(0, 8).join(", ")}${tools.length > 8 ? ", …" : ""})`),
     ];
   };
@@ -360,11 +366,18 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     modelDispatches.splice(i, 1);
     return true;
   };
-  /** The poteto grant: only when the caller is not a model-originated dispatch. */
+  /** The poteto grant: only when the caller is not a model-originated dispatch. In a Task child every input is
+   * model-authored (the parent model wrote the Task prompt, sent on stdin, which print mode dispatches as if typed),
+   * so a child never grants poteto from its own input (children start active, without poteto). */
   const activateFrom = (wantsPoteto: boolean, byModel: boolean, ctx: ExtensionContext) => {
-    if (wantsPoteto && byModel) {
+    if (wantsPoteto && (byModel || !!process.env.PSTACK_TASK_ID)) {
       activate(false, ctx);
-      ctx.ui.notify("pstack: /poteto-mode from a model-started loop does not enable poteto mode; run it yourself.", "warning");
+      ctx.ui.notify(
+        process.env.PSTACK_TASK_ID
+          ? "pstack: /poteto-mode inside a Task is model-authored and does not enable poteto mode."
+          : "pstack: /poteto-mode from a model-started loop does not enable poteto mode; run it yourself.",
+        "warning",
+      );
       return;
     }
     activate(wantsPoteto, ctx);
@@ -709,6 +722,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
         runs: 0,
         createdAt: new Date().toISOString(),
         usage: emptyUsage(),
+        projectTrusted: ctx.isProjectTrusted(),
       };
     }
     writeMeta(home, meta);

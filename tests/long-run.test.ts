@@ -70,6 +70,7 @@ function host() {
     modelRegistry: { find: () => undefined, getAvailable: () => [], hasConfiguredAuth: () => false },
     sessionManager: { getSessionId: () => session.id, getBranch: () => branch, getSessionDir: () => "/s", getSessionFile: () => undefined },
     isIdle: () => session.idle,
+    isProjectTrusted: () => false,
     hasPendingMessages: () => session.pending,
   };
   pstackExtension(pi, { skillsDir: SKILLS });
