@@ -10,7 +10,10 @@ import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 export const MAX_DEPTH = 2;
 export const READONLY_TOOLS = ["read", "grep", "find", "ls"];
 /** Tools this extension provides inside a child; listed explicitly whenever `--tools` restricts the set. */
-export const CHILD_PSTACK_TOOLS = ["Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config"];
+export const CHILD_PSTACK_TOOLS = [
+  "Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config",
+  "GoalSet", "GoalDone", "LoopStart", "LoopStop", "LoopSchedule",
+];
 export const CLOUD_NOTE = "cloud requested; ran locally (pi-pstack is local-only)";
 
 export type TaskStatus = "queued" | "running" | "done" | "error" | "cancelled";
@@ -49,6 +52,10 @@ export interface TaskMeta {
   exitCode?: number;
   error?: string;
   usage: TaskUsage;
+  /** Run number whose completion notification was delivered (or suppressed). */
+  notifiedRun?: number;
+  /** Run number whose settled result the parent already read via TaskOutput / foreground return. */
+  consumedRun?: number;
 }
 
 export interface AgentType {

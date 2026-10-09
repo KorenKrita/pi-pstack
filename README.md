@@ -22,6 +22,8 @@ pstack is off until you use it. Two states, both stored in the session and resto
 | `/pstack on` | Activate pstack (not poteto mode). |
 | `/pstack off` | Turn off pstack and poteto mode; removes only this extension's tools from the active set. |
 | `/pstack status` | Read-only: state, tools provided, tool/command collisions, config path and validation. |
+| `/goal <objective>` | Arm a goal and start on it (activates pstack, not poteto mode). `/goal` alone shows it; `/goal pause`, `resume`, `done`, `clear`. |
+| `/loop [interval] <prompt>` or `/loop <prompt> every <interval>` | Send `<prompt>` now and then repeatedly (`30s`…`1d`; no interval = the model schedules each next tick, default 10 min). `/loop list`, `/loop stop [id\|all]`. |
 
 If another extension already registers `Task` or `AskQuestion`, pstack does not override it and runs without that tool (shown in `/pstack status`).
 
@@ -49,12 +51,21 @@ Run `/setup-pstack` once. It lists your models with configured credentials, asks
 - **Concurrency**: unlimited by default. Optional `$PSTACK_HOME/config.json` `{"maxConcurrent": N}` queues extra spawns FIFO (status `queued`).
 - **Child command**: the running Pi binary (or `pi` on PATH); `PSTACK_PI_BIN` overrides it (tests use a fake).
 - **Store**: `$PSTACK_HOME/tasks/<id>/` holds `meta.json` (status, model, depth, pid, usage, error), `prompt.md`, `system.md`, `output.md`, `events.jsonl` (raw child events), and `session/` (the child's Pi session).
+- **Completion notifications**: when a background task ends `done` or `error`, the parent chat gets a `pstack-task-done` message with the result, which starts a turn when the chat is idle (or waits for the current run to settle). Not sent for cancelled tasks, results already read with `TaskOutput`, tasks from another session, or while pstack is off. Undelivered notifications are re-sent once at the next session start; delivery is at-least-once within one Pi process, not exactly-once across crashes.
+
+## Long runs (`/goal`, `/loop`)
+
+Both are plugin contracts: Cursor's commands are not documented, so the behaviour below is this package's.
+
+- **`/goal`**: while a goal is `active`, a run that ends normally is continued (a hidden `pstack-goal-continue` message) until the model calls `GoalDone` (with evidence) or `GoalDone` with `blocked: true` (pauses and asks you). There is no turn cap. An aborted run (Esc) or a model error pauses the goal; your next message resumes it. It never overrides queued input or another extension's continuation, and stops continuing while pstack is off. The model can arm one with `GoalSet` when a playbook calls for it. State is a session entry, so it follows resume and branch navigation.
+- **`/loop`**: the prompt is sent unchanged, so `/how …` or `/skill:…` still expand. A tick that comes due while the agent is busy fires once when the run settles. Dynamic loops (no interval) take the next delay from `LoopSchedule`, else 10 min. The model can start and stop loops with `LoopStart` / `LoopStop`. Loop definitions are session entries and re-arm on resume; timers run only while Pi runs (no ticks while it is closed, missed ticks are not replayed). `/pstack off` stops all loops.
+- **Agent store**: orchestrate's `orchestrate/<slug>/` and plan files go under `$PSTACK_HOME/projects/--<cwd>--/` (named in the system prompt); `scripts/orch/orch.ts --store <dir>` is the bookkeeping CLI.
 
 ## Status
 
-Provided: activation, commands, prompt injection, `/setup-pstack` with `pstack_config`, `AskQuestion`, and the local `Task` runtime with `TaskStatus` / `TaskOutput` / `TaskCancel`.
+Provided: activation, commands, prompt injection, `/setup-pstack` with `pstack_config`, `AskQuestion`, the local `Task` runtime with `TaskStatus` / `TaskOutput` / `TaskCancel`, completion notifications, `/goal`, `/loop`.
 
-Pending (Step 4): completion notifications that wake the parent chat, `/loop`, `/goal`, `create-skill`, the `mcps/` tool listing.
+Not provided: Cursor's `create-skill` and `mcps/` (the system prompt says how to do without them), cloud agents, Bugbot.
 
 ## Development
 
@@ -67,6 +78,7 @@ bunx tsc --noEmit
 tests/smoke/step2.sh [provider/model]   # real headless Pi; transcripts in tests/smoke/out/ (gitignored)
 tests/smoke/step2-forward.sh [provider/model]
 tests/smoke/step3.sh [provider/model]   # foreground, background + TaskOutput, resume, nesting limit
+tests/smoke/step4.sh [provider/model]   # RPC: completion wakes the parent, /goal until GoalDone, /loop ticks then stops
 ```
 
 Tests and the smoke set `PSTACK_HOME` to a temp dir. The smoke does not exercise interactive UI (`AskQuestion`, setup confirmation); the unit tests cover those with a fake UI.

@@ -100,11 +100,12 @@ Skill text is left as-is except for setup-pstack and the per-role readers (rules
 | **Skill frontmatter `mode` / `reminder`** | Provided: poteto-mode's reminder plus an explicit autonomy grant, only while poteto mode is on (`/poteto-mode`). |
 | **Skill frontmatter `paths`** | **Approximation**: after `read`/`edit`/`write` touches a matching file, a one-per-session hint names the skill. Cursor's exact semantics are not reproduced. `icon` / `color` are ignored. |
 | **Cloud agents / dashboard / restart semantics** | Not provided: everything runs locally. `environment: "cloud"` runs as a local child and the result carries `environment_note`; no cloud isolation or survive-shutdown guarantee. After a restart, tasks left running are marked `error` ("parent Pi exited before completion"); their sessions can still be resumed. |
-| **Background completion notifications** | Pending (Step 4): today the parent polls with `TaskStatus` / `TaskOutput`. |
+| **Background completion notifications** | Provided: a `pstack-task-done` message wakes the idle parent (done/error only; skipped if already read via `TaskOutput`, cancelled, other session, or pstack off); at-least-once within a process, re-sent once after restart. |
 | **Bugbot** | External GitHub product; the adapter note says so. |
-| **`/loop`**, **`/goal`** commands | Pending. |
-| **create-skill** skill | Pending. |
-| **`mcps/` directory** / available-tools map (`why`) | Pending. |
+| **`/loop`**, **`/goal`** commands | Provided as plugin contracts (Cursor's semantics are not public): `/goal` continues normally ended runs until `GoalDone`, pauses on abort/error/blocked; `/loop` sends the prompt unchanged on a fixed or model-scheduled interval, only while Pi runs. Model-facing `GoalSet` / `GoalDone` / `LoopStart` / `LoopStop` / `LoopSchedule`. |
+| **Agent store** ("the current agent's store", orchestrate / multi-phase-plan) | Provided: `$PSTACK_HOME/projects/--<cwd>--/`, named in the adapter note with the `orch.ts --store` invocation. |
+| **create-skill** skill | Not provided; the adapter note tells the model to author Pi Agent Skills directly (format summary) and test by running them. |
+| **`mcps/` directory** / available-tools map (`why`) | Not provided; the adapter note says MCP servers are whatever MCP tools are in the tool list. |
 | **babysit** built-in (routed *away* from) | Nothing to provide. |
 
 Known activation gap: pstack activates on `/skill:<name>`, a pstack slash command, `/pstack on`, or a successful `read` tool call on one of this package's `SKILL.md` files. Reading a SKILL.md through `bash` (`cat`, `sed`) is not detected.

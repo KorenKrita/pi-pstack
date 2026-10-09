@@ -17,6 +17,11 @@ export function modelsRulePath(home: string): string {
   return join(home, "rules", "pstack-models.mdc");
 }
 
+/** Per-workspace agent store (Cursor's ~/.cursor/projects/<slug>/): orchestrate/, docs/. Slug as Pi's session dirs. */
+export function agentStoreDir(home: string, cwd: string): string {
+  return join(home, "projects", `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
+}
+
 export function readModelsRule(home: string): string | undefined {
   try {
     return readFileSync(modelsRulePath(home), "utf8");

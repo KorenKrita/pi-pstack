@@ -136,7 +136,7 @@ afterEach(() => {
   else process.env.PSTACK_HOME = previousHome;
 });
 
-const OWNED = ["Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config"];
+const OWNED = ["Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config", "GoalSet", "GoalDone", "LoopStart", "LoopStop", "LoopSchedule"];
 
 // ---------- R1 activation ----------
 
@@ -274,7 +274,7 @@ describe("/pstack and collisions", () => {
     expect(f.tools.has("Task")).toBe(false);
     expect(f.notes.some((n) => n.type === "warning" && n.message.includes('"Task"'))).toBe(true);
     await f.commands.get("pstack").handler("on", f.ctx);
-    expect(f.active()).toEqual(["read", "bash", "Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config"]);
+    expect(f.active()).toEqual(["read", "bash", "Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config", "GoalSet", "GoalDone", "LoopStart", "LoopStop", "LoopSchedule"]);
     await f.commands.get("pstack").handler("off", f.ctx);
     expect(f.active()).toEqual(["read", "bash", "Task"]);
     await f.commands.get("pstack").handler("status", f.ctx);
@@ -368,6 +368,9 @@ describe("per-turn injection (R3)", () => {
     expect(adapter).toContain(modelsRulePath(home));
     expect(adapter).toContain('environment: "cloud"');
     expect(adapter).toContain("Bugbot");
+    expect(adapter).toContain(`Agent store (Cursor's per-workspace store; orchestrate/, docs/): ${join(home, "projects")}/--`);
+    expect(adapter).toMatch(/bun \S+\/skills\/poteto-mode\/scripts\/orch\/orch\.ts --store/);
+    expect(adapter).toContain("GoalSet/GoalDone");
 
     // Path hints fire once per session.
     await f.emit("tool_result", { toolName: "read", input: { path: "src/b.ts" }, content: [], isError: false });

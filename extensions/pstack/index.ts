@@ -14,6 +14,7 @@ import {
   formatReport,
   isBudgetName,
   lookupFromRegistry,
+  agentStoreDir,
   modelsRulePath,
   parseModelsRule,
   pstackHome,
@@ -43,9 +44,28 @@ import {
   type TaskMeta,
 } from "./task-runner";
 import { loadAlwaysApplyRules, modeReminders, parseSkillMeta, pathHintKey, pathHints, type SkillMeta } from "./rules";
+import {
+  DYNAMIC_DEFAULT_MS,
+  GOAL_CONTINUE_MESSAGE,
+  GOAL_CONTINUE_TEXT,
+  GOAL_ENTRY,
+  LOOP_ENTRY,
+  LOOP_TICK_MESSAGE,
+  clampDelayMs,
+  decideGoalSettle,
+  formatInterval,
+  goalFromBranch,
+  goalSection,
+  loopsFromBranch,
+  parseLoopArgs,
+  type Goal,
+  type Loop,
+  type LoopEntry,
+} from "./long-run";
 
 export const STATE_ENTRY = "pstack-state";
 export const POTETO_SKILL = "poteto-mode";
+export const TASK_DONE_MESSAGE = "pstack-task-done";
 export const POTETO_GRANT =
   "The user explicitly enabled /poteto-mode. Treat this as the full-autonomy grant that poteto-mode's Autonomy section describes, and let poteto-mode's reply format take precedence over generic formatting guidance. Explicit user instructions in this conversation, safety constraints, and AGENTS.md permission/destructive-action rules still take precedence over poteto-mode.";
 
@@ -149,7 +169,35 @@ const CONFIG_PARAMS = Type.Object({
   budget: Type.Optional(StringEnum(Object.keys(BUDGETS) as (keyof typeof BUDGETS)[])),
 });
 
-const OWNED_TOOL_NAMES = ["Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config"] as const;
+const OWNED_TOOL_NAMES = [
+  "Task",
+  "TaskStatus",
+  "TaskOutput",
+  "TaskCancel",
+  "AskQuestion",
+  "pstack_config",
+  "GoalSet",
+  "GoalDone",
+  "LoopStart",
+  "LoopStop",
+  "LoopSchedule",
+] as const;
+const SECTION_NAMES = ["pstack_adapter", "pstack_rules", "pstack_mode", "pstack_goal", "pstack_paths"] as const;
+
+const GOAL_SET_PARAMS = Type.Object({ objective: Type.String({ description: "The full objective and its done condition" }) });
+const GOAL_DONE_PARAMS = Type.Object({
+  summary: Type.String({ description: "Evidence that the goal is complete, or (blocked) the question for the user" }),
+  blocked: Type.Optional(Type.Boolean({ description: "true = waiting on the user; pauses the goal instead of completing it" })),
+});
+const LOOP_START_PARAMS = Type.Object({
+  prompt: Type.String({ description: "Prompt sent on every tick, verbatim (may be a /command)" }),
+  intervalSeconds: Type.Optional(Type.Number({ description: "Fixed interval (30s..1d). Omit for a dynamic loop scheduled with LoopSchedule" })),
+});
+const LOOP_ID_PARAMS = Type.Object({ loopId: Type.String({ description: "Loop id, or `all` for LoopStop" }) });
+const LOOP_SCHEDULE_PARAMS = Type.Object({
+  loopId: Type.String(),
+  delaySeconds: Type.Number({ description: "Seconds until the next tick (clamped to 30s..1d)" }),
+});
 
 /** Nesting depth of this Pi process: 0 = user's chat, N = subagent at level N. */
 const ownDepth = (): number => Number(process.env.PSTACK_DEPTH ?? 0) || 0;
@@ -275,6 +323,8 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
 
   const reconcile = (ctx: ExtensionContext) => {
     state = stateFromBranch(ctx.sessionManager.getBranch());
+    goal = goalFromBranch(ctx.sessionManager.getBranch());
+    showGoalStatus(ctx);
     applyTools(ctx);
   };
 
@@ -381,6 +431,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
               return { content: [{ type: "text", text: `Still ${now.status} (${signal?.aborted ? "aborted" : "timeout"}).\n${taskSummary(now, home)}` }], details: now };
             }
             // Pi marks a tool result failed only when execute() throws.
+            markConsumed(outcome.meta);
             if (!outcome.ok) throw new Error(resultText(outcome, home));
             return { content: [{ type: "text", text: resultText(outcome, home) }], details: outcome.meta };
           }
@@ -393,6 +444,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
             output = readFileSync(outputPath(home, now.id), "utf8");
           } catch {}
           const r: RunResult = { meta: now, output, ok: now.status === "done" };
+          markConsumed(now);
           if (!r.ok) throw new Error(resultText(r, home));
           return { content: [{ type: "text", text: resultText(r, home) }], details: now };
         },
@@ -419,6 +471,84 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
           }
           const r = await pending;
           return { content: [{ type: "text", text: `Cancelled.\n${taskSummary(r.meta, home)}` }], details: r.meta };
+        },
+      });
+    } else if (name === "GoalSet") {
+      pi.registerTool({
+        name,
+        label: "GoalSet",
+        description:
+          "Arm a long-lived /goal that keeps the agent working across turns until GoalDone. Only when the user asked for a goal or gave the explicit go a playbook requires; it does not widen what you are allowed to do.",
+        parameters: GOAL_SET_PARAMS,
+        defaultActive: false,
+        async execute(_id, params, _signal, _onUpdate, ctx) {
+          armGoal(params.objective, ctx);
+          return { content: [{ type: "text", text: `Goal armed: ${params.objective}` }], details: goal };
+        },
+      });
+    } else if (name === "GoalDone") {
+      pi.registerTool({
+        name,
+        label: "GoalDone",
+        description:
+          "Mark the armed /goal complete (with evidence), or with blocked: true pause it until the user answers the question in summary.",
+        parameters: GOAL_DONE_PARAMS,
+        defaultActive: false,
+        async execute(_id, params, _signal, _onUpdate, ctx) {
+          if (!goal || (goal.status !== "active" && goal.status !== "paused")) throw new Error("No armed goal.");
+          const status = params.blocked ? "paused" : "done";
+          setGoal({ ...goal, status, note: params.summary, since: new Date().toISOString() }, ctx);
+          return { content: [{ type: "text", text: params.blocked ? `Goal paused, waiting on the user: ${params.summary}` : `Goal done: ${params.summary}` }], details: goal };
+        },
+      });
+    } else if (name === "LoopStart") {
+      pi.registerTool({
+        name,
+        label: "LoopStart",
+        description:
+          "Start a /loop: send `prompt` now and then repeatedly, every intervalSeconds, or (no interval) when you schedule the next wake with LoopSchedule. Runs only while this Pi process is open.",
+        parameters: LOOP_START_PARAMS,
+        defaultActive: false,
+        async execute(_id, params, _signal, _onUpdate, ctx) {
+          const intervalMs = params.intervalSeconds === undefined ? undefined : clampDelayMs(params.intervalSeconds);
+          const loop = startLoop(params.prompt, intervalMs, ctx);
+          return { content: [{ type: "text", text: `Loop ${loop.id} started (${formatInterval(intervalMs)}).` }], details: loop };
+        },
+      });
+    } else if (name === "LoopStop") {
+      pi.registerTool({
+        name,
+        label: "LoopStop",
+        description: "Stop a /loop by id, or all loops with loopId `all`.",
+        parameters: LOOP_ID_PARAMS,
+        defaultActive: false,
+        async execute(_id, params) {
+          if (params.loopId === "all") {
+            const n = loops.size;
+            stopAllLoops();
+            return { content: [{ type: "text", text: `Stopped ${n} loop(s).` }], details: undefined };
+          }
+          if (!stopLoop(params.loopId)) throw new Error(`No loop "${params.loopId}". ${loopListText()}`);
+          return { content: [{ type: "text", text: `Stopped loop ${params.loopId}.` }], details: undefined };
+        },
+      });
+    } else if (name === "LoopSchedule") {
+      pi.registerTool({
+        name,
+        label: "LoopSchedule",
+        description: "For a dynamic /loop (no interval): set when the next tick fires. Without it the next tick is in 10 minutes.",
+        parameters: LOOP_SCHEDULE_PARAMS,
+        defaultActive: false,
+        async execute(_id, params) {
+          const live = loops.get(params.loopId);
+          if (!live) throw new Error(`No loop "${params.loopId}". ${loopListText()}`);
+          if (live.loop.intervalMs !== undefined) throw new Error(`Loop ${params.loopId} has a fixed interval; stop it and start a dynamic one to schedule ticks.`);
+          live.scheduledMs = clampDelayMs(params.delaySeconds);
+          if (!live.inFlight) {
+            armLoop(live, live.scheduledMs);
+            recordLoop({ op: "schedule", id: live.loop.id, nextAt: live.nextAt! });
+          }
+          return { content: [{ type: "text", text: `Next tick of ${params.loopId} in ${Math.round(live.scheduledMs / 1000)}s.` }], details: undefined };
         },
       });
     } else {
@@ -533,18 +663,262 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     );
     const head = [`taskId: ${meta.id}`, meta.environmentNote ? `environment_note: ${meta.environmentNote}` : "", meta.worktree ? `worktree: ${meta.worktree.path} (branch ${meta.worktree.branch})` : ""].filter(Boolean);
     if (background) {
+      void done.then((r) => queueNotification(r.meta));
       const status = readMeta(home, meta.id)?.status ?? "running";
-      const text = [...head, `status: ${status} in background`, `output: ${outputPath(home, meta.id)}`, "Check with TaskStatus / TaskOutput (wait: true to block). Do not resume a running task."].join("\n");
+      const text = [...head, `status: ${status} in background`, `output: ${outputPath(home, meta.id)}`, "You will get a completion message when it finishes; TaskStatus / TaskOutput (wait: true blocks) inspect it meanwhile. Do not resume a running task."].join("\n");
       return { content: [{ type: "text" as const, text }], details: { taskId: meta.id, status, background: true } };
     }
     const abort = () => getRunner().cancel(meta.id);
     signal?.addEventListener("abort", abort, { once: true });
     const r = await done;
     signal?.removeEventListener("abort", abort);
+    markConsumed(r.meta);
     if (!r.ok) throw new Error(resultText(r, home));
     const text = head.length > 1 ? `${head.slice(1).join("\n")}\n\n${r.output}` : r.output;
     return { content: [{ type: "text" as const, text }], details: { taskId: meta.id, status: r.meta.status, model: r.meta.model, usage: r.meta.usage, exitCode: r.meta.exitCode } };
   };
+
+  // ---------- background completion notifications ----------
+  // A settled background run is queued here, then delivered at an idle boundary after re-checking
+  // that pstack is still active, the chat is the one that started it, and the parent has not already
+  // read the result. Not exactly-once across crashes: delivery is recorded in meta just before sending.
+
+  /** taskId -> run number awaiting delivery. */
+  const pendingNotifications = new Map<string, number>();
+  let lastCtx: ExtensionContext | undefined;
+
+  const markConsumed = (meta: TaskMeta) => {
+    pendingNotifications.delete(meta.id);
+    const now = readMeta(pstackHome(), meta.id);
+    if (now && now.consumedRun !== now.runs) writeMeta(pstackHome(), { ...now, consumedRun: now.runs });
+  };
+
+  const queueNotification = (meta: TaskMeta) => {
+    if (meta.status !== "done" && meta.status !== "error") return;
+    pendingNotifications.set(meta.id, meta.runs);
+    queueMicrotask(() => {
+      if (lastCtx?.isIdle()) flushNotifications(lastCtx);
+    });
+  };
+
+  const notifiedInBranch = (ctx: ExtensionContext): Set<string> => {
+    const keys = new Set<string>();
+    for (const e of ctx.sessionManager.getBranch() as any[]) {
+      if (e.type === "custom_message" && e.customType === TASK_DONE_MESSAGE && e.details) keys.add(`${e.details.taskId}:${e.details.runs}`);
+    }
+    return keys;
+  };
+
+  const flushNotifications = (ctx: ExtensionContext) => {
+    if (!pendingNotifications.size) return;
+    const home = pstackHome();
+    const sessionId = ctx.sessionManager.getSessionId();
+    const already = notifiedInBranch(ctx);
+    for (const [id, run] of [...pendingNotifications]) {
+      const meta = readMeta(home, id);
+      if (!meta || meta.runs !== run || meta.parentSessionId !== sessionId) {
+        // Another session's task (session switched) stays queued for that session; a re-run supersedes.
+        if (!meta || meta.runs !== run) pendingNotifications.delete(id);
+        continue;
+      }
+      pendingNotifications.delete(id);
+      if (meta.consumedRun === run || meta.notifiedRun === run || already.has(`${id}:${run}`)) continue;
+      if (!state.active) {
+        writeMeta(home, { ...meta, notifiedRun: run });
+        continue;
+      }
+      writeMeta(home, { ...meta, notifiedRun: run });
+      let output = "";
+      try {
+        output = readFileSync(outputPath(home, id), "utf8");
+      } catch {}
+      const content = [
+        `Background Task ${id} (${meta.description}) finished: ${meta.status}.`,
+        meta.error ? `Error: ${meta.error}` : "",
+        output ? `Output (first 2000 chars):\n${output.slice(0, 2000)}` : "",
+        `Full result: TaskOutput { taskId: "${id}" }.`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      pi.sendMessage(
+        { customType: TASK_DONE_MESSAGE, content, display: true, details: { taskId: id, runs: run, status: meta.status } },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
+    }
+  };
+
+  /** After a restart: settled runs of this session that were never delivered or read. */
+  const recoverNotifications = (ctx: ExtensionContext) => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    for (const meta of listTasks(pstackHome())) {
+      if (meta.parentSessionId !== sessionId || !meta.background) continue;
+      if (meta.status !== "done" && meta.status !== "error") continue;
+      if (meta.notifiedRun === meta.runs || meta.consumedRun === meta.runs) continue;
+      pendingNotifications.set(meta.id, meta.runs);
+    }
+  };
+
+  // ---------- /goal ----------
+  // A long-lived objective (Cursor /goal). While active, a run that ends normally is continued at
+  // agent_before_settle until GoalDone. Abort or a model error pauses it; a new user message resumes it.
+
+  let goal: Goal | undefined;
+
+  const showGoalStatus = (ctx: ExtensionContext) => {
+    const text = goal && (goal.status === "active" || goal.status === "paused") ? `goal ${goal.status}: ${goal.objective.slice(0, 60)}` : undefined;
+    ctx.ui.setStatus?.("pstack-goal", text);
+  };
+
+  const setGoal = (next: Goal, ctx: ExtensionContext) => {
+    goal = next;
+    pi.appendEntry(GOAL_ENTRY, next);
+    showGoalStatus(ctx);
+  };
+
+  const armGoal = (objective: string, ctx: ExtensionContext) => {
+    activate(false, ctx);
+    setGoal({ objective, status: "active", since: new Date().toISOString() }, ctx);
+  };
+
+  pi.on("agent_before_settle", (event, ctx) => {
+    const decision = decideGoalSettle({
+      goal,
+      pstackActive: state.active,
+      outcome: event.outcome,
+      alreadyContinuing: event.continue,
+      pendingInput: ctx.hasPendingMessages(),
+    });
+    if (decision.kind === "pause" && goal) {
+      setGoal({ ...goal, status: "paused", note: decision.note, since: new Date().toISOString() }, ctx);
+      ctx.ui.notify(`pstack: goal ${decision.note}. Send a message or /goal resume to continue.`, "info");
+      return;
+    }
+    if (decision.kind === "continue") {
+      return {
+        continue: true,
+        entries: [{ type: "custom_message" as const, customType: GOAL_CONTINUE_MESSAGE, content: GOAL_CONTINUE_TEXT, display: false }],
+      };
+    }
+  });
+
+  const goalStatusText = (): string =>
+    goal ? `goal ${goal.status}${goal.note ? ` (${goal.note})` : ""}: ${goal.objective}` : "no goal";
+
+  // ---------- /loop ----------
+  // Loop definitions live in session entries; timers run only while this Pi process lives.
+
+  interface LiveLoop {
+    loop: Loop;
+    timer?: ReturnType<typeof setTimeout>;
+    nextAt?: number;
+    ticks: number;
+    skipped: number;
+    /** A tick came due while busy; fire at the next agent_settled. */
+    due: boolean;
+    /** Dynamic loop: next delay set by LoopSchedule during the current tick's run. */
+    scheduledMs?: number;
+    inFlight: boolean;
+  }
+  const loops = new Map<string, LiveLoop>();
+
+  const recordLoop = (entry: LoopEntry) => pi.appendEntry(LOOP_ENTRY, entry);
+
+  const armLoop = (live: LiveLoop, delayMs: number) => {
+    if (live.timer) clearTimeout(live.timer);
+    live.nextAt = Date.now() + delayMs;
+    live.timer = setTimeout(() => fireLoop(live.loop.id), delayMs);
+    live.timer.unref?.();
+  };
+
+  const fireLoop = (id: string) => {
+    const live = loops.get(id);
+    if (!live) return;
+    live.timer = undefined;
+    const ctx = lastCtx;
+    if (!ctx || !state.active) return;
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+      live.skipped++;
+      live.due = true;
+      return;
+    }
+    live.due = false;
+    live.ticks++;
+    live.inFlight = true;
+    live.scheduledMs = undefined;
+    pi.sendMessage({ customType: LOOP_TICK_MESSAGE, content: `/loop ${id} tick ${live.ticks}`, display: true, details: { loopId: id, tick: live.ticks } });
+    // The prompt goes in unchanged so `/how …` or `/skill:…` still expand.
+    pi.sendUserMessage(live.loop.prompt, { expandPromptTemplates: true });
+    if (live.loop.intervalMs !== undefined) armLoop(live, live.loop.intervalMs);
+  };
+
+  const startLoop = (prompt: string, intervalMs: number | undefined, ctx: ExtensionContext): Loop => {
+    activate(false, ctx);
+    const loop: Loop = {
+      id: `l${Date.now().toString(36)}`,
+      prompt,
+      ...(intervalMs === undefined ? {} : { intervalMs }),
+      sessionId: ctx.sessionManager.getSessionId(),
+      createdAt: new Date().toISOString(),
+    };
+    recordLoop({ op: "add", loop });
+    const live: LiveLoop = { loop, ticks: 0, skipped: 0, due: false, inFlight: false };
+    loops.set(loop.id, live);
+    lastCtx = ctx;
+    // First tick right away (Cursor runs the prompt, then repeats).
+    queueMicrotask(() => fireLoop(loop.id));
+    return loop;
+  };
+
+  const stopLoop = (id: string): boolean => {
+    const live = loops.get(id);
+    if (!live) return false;
+    if (live.timer) clearTimeout(live.timer);
+    loops.delete(id);
+    recordLoop({ op: "stop", id });
+    return true;
+  };
+
+  const stopAllLoops = () => {
+    for (const id of [...loops.keys()]) stopLoop(id);
+  };
+
+  /** Re-arm this session's loops after a resume/reload; missed ticks are not replayed. */
+  const restoreLoops = (ctx: ExtensionContext) => {
+    for (const live of loops.values()) if (live.timer) clearTimeout(live.timer);
+    loops.clear();
+    for (const { loop, nextAt } of loopsFromBranch(ctx.sessionManager.getBranch(), ctx.sessionManager.getSessionId())) {
+      const live: LiveLoop = { loop, ticks: 0, skipped: 0, due: false, inFlight: false };
+      loops.set(loop.id, live);
+      const delay = Math.max(0, (nextAt ?? Date.now() + (loop.intervalMs ?? DYNAMIC_DEFAULT_MS)) - Date.now());
+      armLoop(live, delay);
+    }
+  };
+
+  const onSettledLoops = () => {
+    for (const live of loops.values()) {
+      if (live.inFlight) {
+        live.inFlight = false;
+        if (live.loop.intervalMs === undefined) {
+          const delay = live.scheduledMs ?? DYNAMIC_DEFAULT_MS;
+          armLoop(live, delay);
+          recordLoop({ op: "schedule", id: live.loop.id, nextAt: live.nextAt! });
+        }
+      }
+    }
+    for (const live of loops.values()) {
+      if (live.due && lastCtx?.isIdle()) {
+        fireLoop(live.loop.id);
+        break;
+      }
+    }
+  };
+
+  const loopListText = (): string =>
+    loops.size
+      ? [...loops.values()]
+          .map((l) => `${l.loop.id} every ${formatInterval(l.loop.intervalMs)}: ${l.loop.prompt} (ticks ${l.ticks}, skipped ${l.skipped}${l.nextAt ? `, next in ${Math.max(0, Math.round((l.nextAt - Date.now()) / 1000))}s` : ""})`)
+          .join("\n")
+      : "no loops";
 
   // ---------- events ----------
 
@@ -557,6 +931,16 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     // Subagent processes start active: the parent already chose pstack.
     if (ownDepth() >= 1 && !state.active) setState({ active: true, poteto: false }, ctx);
     for (const meta of reconcileOrphans(pstackHome())) warn(ctx, `pstack: task ${meta.id} (${meta.description}) ended when its parent Pi exited.`);
+    lastCtx = ctx;
+    recoverNotifications(ctx);
+    if (ctx.isIdle()) flushNotifications(ctx);
+    restoreLoops(ctx);
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    lastCtx = ctx;
+    flushNotifications(ctx);
+    onSettledLoops();
   });
 
   pi.on("session_shutdown", async () => {
@@ -583,6 +967,10 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       const own = resolveSkillCommand(name);
       if (own) activate(own === POTETO_SKILL, ctx);
     }
+    // Cursor: a new user message on a paused goal re-activates it. Commands (/goal pause …) are not messages.
+    if (goal?.status === "paused" && event.source !== "extension" && !event.text.startsWith("/")) {
+      setGoal({ ...goal, status: "active", note: undefined, since: new Date().toISOString() }, ctx);
+    }
     return { action: "continue" };
   });
 
@@ -600,7 +988,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
   });
 
   pi.on("before_agent_start", (event, ctx) => {
-    for (const name of ["pstack_adapter", "pstack_rules", "pstack_mode", "pstack_paths"]) {
+    for (const name of SECTION_NAMES) {
       delete event.systemPromptOptions.sections[name];
     }
     if (state.active) {
@@ -615,7 +1003,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     if (!current) return;
     const desired = state.active ? new Map(buildSections(ctx)) : new Map<string, string>();
     const patch: Record<string, string | null> = {};
-    for (const name of ["pstack_adapter", "pstack_rules", "pstack_mode", "pstack_paths"]) {
+    for (const name of SECTION_NAMES) {
       const text = desired.get(name);
       const rendered = text ? `<${name}>\n${text}\n</${name}>` : undefined;
       if (rendered !== current.sections?.[name]) {
@@ -636,6 +1024,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       out.push(["pstack_rules", loaded.rules.map((r) => `<!-- ${r.file} -->\n${r.body.trim()}`).join("\n\n")]);
     }
     if (state.poteto) out.push(["pstack_mode", [...modeReminders(skillMetas), POTETO_GRANT].join("\n\n")]);
+    if (goal?.status === "active") out.push(["pstack_goal", goalSection(goal)]);
     if (pendingHints.length) {
       out.push(["pstack_paths", `${pendingHints.join("\n")}\n(Plugin approximation of Cursor's \`paths\` skill field.)`]);
       pendingHints.length = 0;
@@ -659,9 +1048,13 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       "- Candidate models for Task (configured credentials, not a liveness check):",
       ...(models.length ? models : ["- (none)"]),
       `- Transcripts are Pi JSONL under ${ctx.sessionManager.getSessionDir()}${sessionFile ? ` (this session: ${sessionFile})` : ""}.`,
+      `- Agent store (Cursor's per-workspace store; orchestrate/, docs/): ${agentStoreDir(home, ctx.cwd)}. Run orch as \`bun ${join(skillsDir, "poteto-mode", "scripts", "orch", "orch.ts")} --store <store>/orchestrate/<project-slug> …\`.`,
+      "- Long runs: GoalSet/GoalDone arm and finish a /goal (continued across turns until GoalDone); LoopStart/LoopStop/LoopSchedule run a /loop. Background Task completions arrive as a message that wakes this chat. All of it lives only while this Pi process runs.",
       '- Everything runs locally: an upstream `environment: "cloud"` request runs as the approved local substitute, with no cloud isolation or survive-shutdown guarantee.',
       `- Task runs each subagent as a local Pi child process (nesting: root plus ${MAX_DEPTH} levels). Background tasks return a taskId; check them with TaskStatus / TaskOutput (wait: true blocks) and stop them with TaskCancel, never by resuming. \`readonly\` restricts tools; it is not a sandbox. \`isolation: "worktree"\` runs in a fresh git worktree. Background tasks end when this Pi process exits.`,
       "- Bugbot is an external GitHub product, not a tool here.",
+      "- Cursor's built-in `create-skill` skill does not exist in Pi: author SKILL.md files directly in Pi's Agent Skills format (directory named after the skill; frontmatter `name` = directory name, lowercase a-z0-9-, and a specific `description`; body in Markdown; relative paths resolve against the skill dir), then test by running the skill.",
+      "- There is no Cursor `mcps/` directory: the MCP servers available are whatever MCP tools appear in your tool list (none if no MCP extension is loaded).",
     ].join("\n");
   };
 
@@ -690,12 +1083,72 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
             cmdCtx.ui.notify("pstack: active", "info");
           } else if (sub === "off") {
             setState(OFF, cmdCtx);
+            stopAllLoops();
             cmdCtx.ui.notify("pstack: off", "info");
           } else if (sub === "status" || sub === "") {
             cmdCtx.ui.notify(statusText(cmdCtx), "info");
           } else {
             cmdCtx.ui.notify("Usage: /pstack on | off | status", "warning");
           }
+        },
+      }),
+    );
+    tryRegister("goal", () =>
+      pi.registerCommand("goal", {
+        description: "pstack: /goal <objective> | pause | resume | clear | done | (status)",
+        handler: async (args, cmdCtx) => {
+          lastCtx = cmdCtx;
+          const sub = args.trim();
+          const live = goal && (goal.status === "active" || goal.status === "paused");
+          const now = new Date().toISOString();
+          if (sub === "" || sub === "status") {
+            cmdCtx.ui.notify(`pstack: ${goalStatusText()}`, "info");
+          } else if (sub === "pause" || sub === "resume" || sub === "clear" || sub === "done") {
+            if (!goal || !live) {
+              cmdCtx.ui.notify("pstack: no armed goal", "warning");
+              return;
+            }
+            const status = sub === "pause" ? "paused" : sub === "resume" ? "active" : sub === "clear" ? "cleared" : "done";
+            setGoal({ ...goal, status, note: sub === "pause" ? "paused by the user" : undefined, since: now }, cmdCtx);
+            cmdCtx.ui.notify(`pstack: ${goalStatusText()}`, "info");
+            if (status === "active" && cmdCtx.isIdle()) pi.sendUserMessage(`Continue toward the armed goal: ${goal.objective}`);
+          } else {
+            armGoal(sub, cmdCtx);
+            cmdCtx.ui.notify(`pstack: ${goalStatusText()}`, "info");
+            // Start working on it now (Cursor begins the goal immediately).
+            pi.sendUserMessage(`Goal: ${sub}`, cmdCtx.isIdle() ? undefined : { deliverAs: "followUp" });
+          }
+        },
+      }),
+    );
+    tryRegister("loop", () =>
+      pi.registerCommand("loop", {
+        description: "pstack: /loop [interval] <prompt> | <prompt> every <interval> | list | stop [id|all]",
+        handler: async (args, cmdCtx) => {
+          lastCtx = cmdCtx;
+          const text = args.trim();
+          if (text === "list") {
+            cmdCtx.ui.notify(`pstack loops:\n${loopListText()}`, "info");
+            return;
+          }
+          const stop = /^stop(?:\s+(\S+))?$/.exec(text);
+          if (stop) {
+            const id = stop[1] ?? "all";
+            if (id === "all") {
+              const n = loops.size;
+              stopAllLoops();
+              cmdCtx.ui.notify(`pstack: stopped ${n} loop(s)`, "info");
+            } else if (stopLoop(id)) cmdCtx.ui.notify(`pstack: stopped loop ${id}`, "info");
+            else cmdCtx.ui.notify(`pstack: no loop "${id}"\n${loopListText()}`, "warning");
+            return;
+          }
+          const parsed = parseLoopArgs(text);
+          if ("error" in parsed) {
+            cmdCtx.ui.notify(`pstack: ${parsed.error}`, "warning");
+            return;
+          }
+          const loop = startLoop(parsed.prompt, parsed.intervalMs, cmdCtx);
+          cmdCtx.ui.notify(`pstack: loop ${loop.id} started (${formatInterval(loop.intervalMs)}): ${loop.prompt}`, "info");
         },
       }),
     );

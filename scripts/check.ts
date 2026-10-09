@@ -77,6 +77,8 @@ export function checkSkillRefs(file: string, text: string, known: Set<string>): 
 function walk(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).flatMap((n) => {
+    // Installed script dependencies (gitignored) are not vendored output.
+    if (n === "node_modules") return [];
     const p = join(dir, n);
     return statSync(p).isDirectory() ? walk(p) : [p];
   });

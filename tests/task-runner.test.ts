@@ -48,26 +48,35 @@ afterEach(() => {
 
 function makeHost(cwd = tmpdir()) {
   const tools = new Map<string, any>();
+  const commands = new Map<string, any>();
   const handlers = new Map<string, ((e: any, c: any) => any)[]>();
   const notes: string[] = [];
+  const sentMessages: { message: any; options: any }[] = [];
+  const sentUser: { text: string; options: any }[] = [];
+  const statuses = new Map<string, string | undefined>();
   let active: string[] = [];
   const branch: any[] = [];
+  const session = { id: "sess-1", idle: true, pending: false };
   const pi: any = {
     on: (e: string, h: any) => handlers.set(e, [...(handlers.get(e) ?? []), h]),
     registerTool: (t: any) => tools.set(t.name, t),
-    registerCommand: () => {},
+    registerCommand: (name: string, options: any) => commands.set(name, options),
     getAllTools: () => [...tools.keys()].map((name) => ({ name, sourceInfo: { path: join(REPO, "extensions/pstack/index.ts") } })),
     getActiveTools: () => [...active],
     setActiveTools: (n: string[]) => (active = [...n]),
     getCommands: () => [],
     appendEntry: (customType: string, data: unknown) => branch.push({ type: "custom", customType, data }),
-    sendUserMessage: () => {},
+    sendUserMessage: (text: string, options: any) => sentUser.push({ text, options }),
+    sendMessage: (message: any, options: any) => {
+      sentMessages.push({ message, options });
+      branch.push({ type: "custom_message", ...message });
+    },
     getThinkingLevel: () => "medium",
   };
   const ctx: any = {
     cwd,
     hasUI: false,
-    ui: { notify: (m: string) => notes.push(m) },
+    ui: { notify: (m: string) => notes.push(m), setStatus: (k: string, t: string | undefined) => statuses.set(k, t) },
     model: { provider: "anthropic", id: "opus" },
     modelRegistry: {
       find: (p: string, id: string) =>
@@ -75,16 +84,20 @@ function makeHost(cwd = tmpdir()) {
       getAvailable: () => [{ provider: "anthropic", id: "opus", reasoning: true, thinkingLevelMap: { xhigh: "xhigh", max: "max" } }],
       hasConfiguredAuth: () => true,
     },
-    sessionManager: { getSessionId: () => "sess-1", getBranch: () => branch, getSessionDir: () => "/s", getSessionFile: () => undefined },
-    isIdle: () => true,
+    sessionManager: { getSessionId: () => session.id, getBranch: () => branch, getSessionDir: () => "/s", getSessionFile: () => undefined },
+    isIdle: () => session.idle,
+    hasPendingMessages: () => session.pending,
   };
   pstackExtension(pi, { skillsDir: SKILLS });
   const emit = async (e: string, payload: any = {}) => {
-    for (const h of handlers.get(e) ?? []) await h({ type: e, ...payload }, ctx);
+    let result: any;
+    for (const h of handlers.get(e) ?? []) result = (await h({ type: e, ...payload }, ctx)) ?? result;
+    return result;
   };
   const call = (name: string, params: any, signal?: AbortSignal, onUpdate?: (u: any) => void) =>
     tools.get(name).execute("call-1", params, signal, onUpdate, ctx);
-  return { tools, ctx, notes, emit, call, active: () => active };
+  const command = (name: string, args: string) => commands.get(name).handler(args, ctx);
+  return { tools, commands, ctx, notes, emit, call, command, session, branch, sentMessages, sentUser, statuses, active: () => active };
 }
 
 const text = (r: any) => r.content[0].text as string;
@@ -128,7 +141,7 @@ describe("child launch (T1, T2)", () => {
   test("resume adds -c; readonly restricts tools but keeps pstack tools", () => {
     const args = buildChildArgs("/h", sampleMeta({ readonly: true }), general, { ...launch, resume: true });
     expect(args.slice(0, 6)).toEqual(["--mode", "json", "-p", "--session-dir", "/h/tasks/tabc/session", "-c"]);
-    expect(args[args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,Task,TaskStatus,TaskOutput,TaskCancel,AskQuestion,pstack_config");
+    expect(args[args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,Task,TaskStatus,TaskOutput,TaskCancel,AskQuestion,pstack_config,GoalSet,GoalDone,LoopStart,LoopStop,LoopSchedule");
     expect(args).not.toContain("--thinking");
   });
 
@@ -276,7 +289,7 @@ describe("Task tool (T3–T8)", () => {
     expect(readFileSync(join(home, "tasks", r.details.taskId, "system.md"), "utf8")).toContain("# Poteto subagent");
     await expect(h.call("Task", { description: "u", prompt: "p", subagent_type: "nope" })).rejects.toThrow(/Available: generalPurpose, explore, bash, browser, Comment Sicko, poteto-agent/);
     const e = JSON.parse(text(await h.call("Task", { description: "e", prompt: "args", subagent_type: "explore" })));
-    expect(e.args[e.args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,Task,TaskStatus,TaskOutput,TaskCancel,AskQuestion,pstack_config");
+    expect(e.args[e.args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,Task,TaskStatus,TaskOutput,TaskCancel,AskQuestion,pstack_config,GoalSet,GoalDone,LoopStart,LoopStop,LoopSchedule");
     expect(e.env.PSTACK_READONLY).toBe("1");
     const b = JSON.parse(text(await h.call("Task", { description: "b", prompt: "args", subagent_type: "bash", readonly: true })));
     expect(b.args[b.args.indexOf("--tools") + 1]).not.toContain("bash");
@@ -443,5 +456,113 @@ describe("orphans (T5)", () => {
     writeMeta(home, sampleMeta({ id: "torph2", status: "queued", ownerPid: dead }));
     await h.emit("session_start", { reason: "startup" });
     expect(h.notes.some((n) => n.includes("torph2"))).toBe(true);
+  });
+});
+
+describe("background completion notifications (Step 4 N1)", () => {
+  // Tasks are only started while pstack is active (a skill or /pstack on activates it).
+  const started = async (h: ReturnType<typeof makeHost>, prompt: string) => {
+    if (!h.active().includes("Task")) await h.command("pstack", "on");
+    return taskIdOf(await h.call("Task", { description: "bg", prompt, run_in_background: true }));
+  };
+  const settle = async (h: ReturnType<typeof makeHost>, id: string) => {
+    while (["running", "queued"].includes(readMeta(home, id)!.status)) await Bun.sleep(20);
+    await Bun.sleep(20);
+  };
+  const doneMessages = (h: ReturnType<typeof makeHost>) => h.sentMessages.filter((m) => m.message.customType === "pstack-task-done");
+
+  test("idle: one message that starts a turn, with status and output", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    const id = await started(h, "echo:ripe");
+    await settle(h, id);
+    const msgs = doneMessages(h);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+    expect(msgs[0]!.message.content).toContain(`Background Task ${id} (bg) finished: done.`);
+    expect(msgs[0]!.message.content).toContain("ripe");
+    expect(msgs[0]!.message.details).toEqual({ taskId: id, runs: 1, status: "done" });
+    expect(readMeta(home, id)!.notifiedRun).toBe(1);
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(1);
+  });
+
+  test("busy: held until agent_settled; errors notify; cancelled does not", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    h.session.idle = false;
+    const failed = await started(h, "fail");
+    await settle(h, failed);
+    expect(doneMessages(h)).toHaveLength(0);
+    h.session.idle = true;
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(1);
+    expect(doneMessages(h)[0]!.message.content).toContain("finished: error.");
+    const slow = await started(h, "sleep:3000");
+    await Bun.sleep(200);
+    await h.call("TaskCancel", { taskId: slow });
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(1);
+  });
+
+  test("result read through TaskOutput before delivery: no notification", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    h.session.idle = false;
+    const id = await started(h, "echo:x");
+    expect(text(await h.call("TaskOutput", { taskId: id, wait: true }))).toBe("x");
+    h.session.idle = true;
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(0);
+    expect(readMeta(home, id)!.consumedRun).toBe(1);
+  });
+
+  test("/pstack off before delivery suppresses it", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    h.session.idle = false;
+    const id = await started(h, "echo:x");
+    await settle(h, id);
+    await h.command("pstack", "off");
+    h.session.idle = true;
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(0);
+    expect(readMeta(home, id)!.notifiedRun).toBe(1);
+  });
+
+  test("session switch: another chat gets nothing; the starting chat gets it on return", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    h.session.idle = false;
+    const id = await started(h, "echo:x");
+    await settle(h, id);
+    h.session.id = "sess-2";
+    h.session.idle = true;
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(0);
+    h.session.id = "sess-1";
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(1);
+  });
+
+  test("restart: undelivered settled runs are delivered once at session_start; branch copy dedupes", async () => {
+    writeMeta(home, sampleMeta({ id: "tlost", parentSessionId: "sess-1", background: true, status: "done", runs: 1 }));
+    writeFileSync(join(home, "tasks", "tlost", "output.md"), "late");
+    writeMeta(home, sampleMeta({ id: "tseen", parentSessionId: "sess-1", background: true, status: "done", runs: 1 }));
+    const h = makeHost();
+    h.branch.push({ type: "custom_message", customType: "pstack-task-done", details: { taskId: "tseen", runs: 1 } });
+    h.branch.push({ type: "custom", customType: "pstack-state", data: { active: true, poteto: false } });
+    await h.emit("session_start", { reason: "resume" });
+    expect(doneMessages(h).map((m) => m.message.details.taskId)).toEqual(["tlost"]);
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(1);
+  });
+
+  test("a foreground result is never notified", async () => {
+    const h = makeHost();
+    await h.emit("session_start", { reason: "startup" });
+    await h.call("Task", { description: "fg", prompt: "echo:x" });
+    await h.emit("agent_settled", { aborted: false });
+    expect(doneMessages(h)).toHaveLength(0);
   });
 });
