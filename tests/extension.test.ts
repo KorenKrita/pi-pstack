@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import { loadAlwaysApplyRules } from "../extensions/pstack/rules";
-import { ROLES, TASK_NOT_IMPLEMENTED, modelsRulePath } from "../extensions/pstack/config";
+import { ROLES, modelsRulePath } from "../extensions/pstack/config";
+const FAKE_PI = fileURLToPath(new URL("./fixtures/fake-pi.ts", import.meta.url));
 import {
   POTETO_GRANT,
   STATE_ENTRY,
@@ -88,14 +89,17 @@ function makePi(opts: FakeOptions = {}) {
     ],
     appendEntry: (customType: string, data: unknown) => branch.push({ type: "custom", customType, data }),
     sendUserMessage: (text: string, options: unknown) => sent.push({ text, options }),
+    getThinkingLevel: () => "high",
   };
 
   const ctx: any = {
-    cwd: "/work",
+    cwd: tmpdir(),
     hasUI: true,
     ui: { notify: (message: string, type?: string) => notes.push({ message, type }) },
     modelRegistry: fakeRegistry(),
+    model: { provider: "anthropic", id: "opus" },
     sessionManager: {
+      getSessionId: () => "sess-1",
       getBranch: () => branch,
       getSessionDir: () => "/sessions/--work--",
       getSessionFile: () => "/sessions/--work--/s.jsonl",
@@ -127,11 +131,12 @@ beforeEach(() => {
   process.env.PSTACK_HOME = home;
 });
 afterEach(() => {
+  delete process.env.PSTACK_PI_BIN;
   if (previousHome === undefined) delete process.env.PSTACK_HOME;
   else process.env.PSTACK_HOME = previousHome;
 });
 
-const OWNED = ["Task", "AskQuestion", "pstack_config"];
+const OWNED = ["Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config"];
 
 // ---------- R1 activation ----------
 
@@ -269,7 +274,7 @@ describe("/pstack and collisions", () => {
     expect(f.tools.has("Task")).toBe(false);
     expect(f.notes.some((n) => n.type === "warning" && n.message.includes('"Task"'))).toBe(true);
     await f.commands.get("pstack").handler("on", f.ctx);
-    expect(f.active()).toEqual(["read", "bash", "Task", "AskQuestion", "pstack_config"]);
+    expect(f.active()).toEqual(["read", "bash", "Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config"]);
     await f.commands.get("pstack").handler("off", f.ctx);
     expect(f.active()).toEqual(["read", "bash", "Task"]);
     await f.commands.get("pstack").handler("status", f.ctx);
@@ -565,10 +570,12 @@ describe("pstack_config (R5) and Task (R7)", () => {
     }
     writeFileSync(path, good.replace("alwaysApply: true", "alwaysApply: true # enabled"));
     expect(loadAlwaysApplyRules(join(home, "rules")).rules).toHaveLength(1);
-    await expect(task()).rejects.toThrow(TASK_NOT_IMPLEMENTED);
+    process.env.PSTACK_PI_BIN = FAKE_PI;
+    const ok = await f.tools.get("Task").execute("id", { description: "d", prompt: "echo:hi" }, undefined, undefined, f.ctx);
+    expect(ok.content[0].text).toBe("hi");
   });
 
-  test("Task: not configured → setup error; unknown model → available ids; valid → not implemented", async () => {
+  test("Task: not configured → setup error; unknown model → available ids; valid → runs with the resolved model", async () => {
     const f = makePi();
     await f.emit("session_start", { reason: "startup" });
     const task = (model?: string) =>
@@ -577,7 +584,12 @@ describe("pstack_config (R5) and Task (R7)", () => {
     runConfigTool({ action: "write", roles: fullRoles("auto"), budget: "small" }, ctx);
     await expect(task("nope/x")).rejects.toThrow(/Unknown model "nope\/x"[\s\S]*anthropic\/opus, local\/plain/);
     await expect(task("local/plain:high")).rejects.toThrow(/Supported levels: off/);
-    await expect(task("anthropic/opus:max")).rejects.toThrow(TASK_NOT_IMPLEMENTED);
-    await expect(task("inherit-parent")).rejects.toThrow(TASK_NOT_IMPLEMENTED);
+    process.env.PSTACK_PI_BIN = FAKE_PI;
+    const run = (model: string) =>
+      f.tools.get("Task").execute("id", { description: "d", prompt: "args", model }, undefined, undefined, f.ctx);
+    const explicit = JSON.parse((await run("anthropic/opus:max")).content[0].text);
+    expect(explicit.args.slice(explicit.args.indexOf("--model"), explicit.args.indexOf("--model") + 4)).toEqual(["--model", "anthropic/opus", "--thinking", "max"]);
+    const parent = JSON.parse((await run("inherit-parent")).content[0].text);
+    expect(parent.args.slice(parent.args.indexOf("--model"), parent.args.indexOf("--model") + 4)).toEqual(["--model", "anthropic/opus", "--thinking", "high"]);
   });
 });

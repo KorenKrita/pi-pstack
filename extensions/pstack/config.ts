@@ -355,7 +355,6 @@ export function formatReport(report: ValidationReport): string {
 // ---------- Task gate (R7 i–iii) ----------
 
 export const NOT_CONFIGURED = "pstack is not configured: run /setup-pstack";
-export const TASK_NOT_IMPLEMENTED = "Task execution is not implemented yet (pi-pstack Step 3).";
 
 export type TaskModel = { kind: "parent" } | { kind: "model"; provider: string; id: string; level?: ModelThinkingLevel };
 
@@ -374,12 +373,12 @@ export function resolveTaskModel(
 export type TaskGateResult =
   | { stage: "config"; text: string }
   | { stage: "model"; text: string }
-  | { stage: "not-implemented"; text: string; model: TaskModel };
+  | { stage: "ok"; text: string; model: TaskModel };
 
 export function taskGate(configText: string | undefined, model: string | undefined, lookup: ModelLookup): TaskGateResult {
   const report = validateConfigText(configText, lookup);
   if (!report.ok) return { stage: "config", text: `${NOT_CONFIGURED}\n\n${formatReport(report)}` };
   const resolved = resolveTaskModel(model, lookup);
   if (!resolved.ok) return { stage: "model", text: resolved.error };
-  return { stage: "not-implemented", text: TASK_NOT_IMPLEMENTED, model: resolved.model };
+  return { stage: "ok", text: "ok", model: resolved.model };
 }

@@ -93,13 +93,14 @@ Skill text is left as-is except for setup-pstack and the per-role readers (rules
 | Built-in | Status in Pi |
 | --- | --- |
 | **AskQuestion** tool | Provided. Cursor's schema is not public, so this is a plugin contract: `{ title?, questions: [{ id, prompt, options: [{ id, label }], allow_multiple? }] }` via `ctx.ui.select`; returns selected ids+labels per question, an explicit cancelled result, or (no UI) an error telling the model to ask in plain text. |
-| **Task** tool | Schema (`description`, `prompt`, `subagent_type`, `model`, `readonly`, `run_in_background`, `resume`, `environment`), config gate, and model resolution provided. Execution is **pending (Step 3)**: a valid call returns "Task execution is not implemented yet (pi-pstack Step 3)". |
+| **Task** tool | Provided as local Pi child processes: foreground/background, `resume` (child session continued with `-c`), `subagent_type` (`generalPurpose`, `explore`, `bash`, `browser`, package agents), `model` per role with thinking level, `readonly` (tool restriction, not a sandbox), nesting root + 2, unlimited concurrency with optional `maxConcurrent`. Plugin additions: `isolation: "worktree"` and the `TaskStatus` / `TaskOutput` / `TaskCancel` tools (Cursor's background-agent inspection surface is not public). Background children do not survive the parent Pi process. |
 | **setup-pstack writes** | Provided via the `pstack_config` tool (`read` → parsed config + validation report; `write` → apply budget, reject unresolved entries, validate, atomic write in upstream `.mdc` shape). Arena, swarm, and interrogate also read through this tool so `PSTACK_HOME` is consistent. |
 | **`~/.pi/pstack/rules/*.mdc` always-applied rules** | Provided: bodies of `$PSTACK_HOME/rules/*.mdc` with `alwaysApply: true` are injected every turn while pstack is active; malformed frontmatter is skipped with a warning. |
 | **Session path in system prompt** | Provided in the adapter note (session dir + current session file). |
 | **Skill frontmatter `mode` / `reminder`** | Provided: poteto-mode's reminder plus an explicit autonomy grant, only while poteto mode is on (`/poteto-mode`). |
 | **Skill frontmatter `paths`** | **Approximation**: after `read`/`edit`/`write` touches a matching file, a one-per-session hint names the skill. Cursor's exact semantics are not reproduced. `icon` / `color` are ignored. |
-| **Cloud agents / dashboard / restart semantics** | Not provided: everything runs locally; the adapter note says an `environment: "cloud"` request runs as the local substitute with no cloud isolation or survive-shutdown guarantee. |
+| **Cloud agents / dashboard / restart semantics** | Not provided: everything runs locally. `environment: "cloud"` runs as a local child and the result carries `environment_note`; no cloud isolation or survive-shutdown guarantee. After a restart, tasks left running are marked `error` ("parent Pi exited before completion"); their sessions can still be resumed. |
+| **Background completion notifications** | Pending (Step 4): today the parent polls with `TaskStatus` / `TaskOutput`. |
 | **Bugbot** | External GitHub product; the adapter note says so. |
 | **`/loop`**, **`/goal`** commands | Pending. |
 | **create-skill** skill | Pending. |

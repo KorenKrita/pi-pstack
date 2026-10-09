@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCurrentSystemMessage, getSupportedThinkingLevels, StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import {
   BUDGETS,
   applyBudget,
@@ -25,6 +25,22 @@ import {
   writeModelsRule,
   type RoleMap,
 } from "./config";
+import {
+  CLOUD_NOTE,
+  MAX_DEPTH,
+  TaskRunner,
+  createWorktree,
+  emptyUsage,
+  listTasks,
+  loadAgentTypes,
+  newTaskId,
+  outputPath,
+  readMeta,
+  reconcileOrphans,
+  writeMeta,
+  type RunResult,
+  type TaskMeta,
+} from "./task-runner";
 import { loadAlwaysApplyRules, modeReminders, parseSkillMeta, pathHintKey, pathHints, type SkillMeta } from "./rules";
 
 export const STATE_ENTRY = "pstack-state";
@@ -111,6 +127,15 @@ const TASK_PARAMS = Type.Object({
   run_in_background: Type.Optional(Type.Boolean()),
   resume: Type.Optional(Type.String({ description: "Id of a previous Task to resume" })),
   environment: Type.Optional(Type.String({ description: "Upstream `cloud` runs as the local substitute" })),
+  isolation: Type.Optional(StringEnum(["worktree"] as const, { description: "Run in a fresh git worktree on branch pstack/<id>" })),
+});
+
+const TASK_ID_PARAMS = Type.Object({ taskId: Type.String({ description: "Task id returned by Task" }) });
+const TASK_STATUS_PARAMS = Type.Object({ taskId: Type.Optional(Type.String({ description: "Omit to list this session's tasks" })) });
+const TASK_OUTPUT_PARAMS = Type.Object({
+  taskId: Type.String({ description: "Task id returned by Task" }),
+  wait: Type.Optional(Type.Boolean({ description: "Block until the task finishes" })),
+  timeoutSeconds: Type.Optional(Type.Number({ description: "With wait: give up after this many seconds (default 600)" })),
 });
 
 const CONFIG_PARAMS = Type.Object({
@@ -123,7 +148,25 @@ const CONFIG_PARAMS = Type.Object({
   budget: Type.Optional(StringEnum(Object.keys(BUDGETS) as (keyof typeof BUDGETS)[])),
 });
 
-const OWNED_TOOL_NAMES = ["Task", "AskQuestion", "pstack_config"] as const;
+const OWNED_TOOL_NAMES = ["Task", "TaskStatus", "TaskOutput", "TaskCancel", "AskQuestion", "pstack_config"] as const;
+
+/** Nesting depth of this Pi process: 0 = user's chat, N = subagent at level N. */
+const ownDepth = (): number => Number(process.env.PSTACK_DEPTH ?? 0) || 0;
+
+function taskSummary(meta: TaskMeta, home: string): string {
+  const end = meta.endedAt ? Date.parse(meta.endedAt) : Date.now();
+  const start = meta.startedAt ? Date.parse(meta.startedAt) : end;
+  return [
+    `${meta.id} [${meta.status}] ${meta.description}`,
+    `  type ${meta.subagentType}, model ${meta.model}${meta.thinking ? `:${meta.thinking}` : ""}, ${meta.background ? "background" : "foreground"}${meta.readonly ? ", readonly" : ""}, ${Math.round((end - start) / 1000)}s, ${meta.usage.turns} turns`,
+    `  output ${outputPath(home, meta.id)}${meta.worktree ? `\n  worktree ${meta.worktree.path} (branch ${meta.worktree.branch})` : ""}${meta.error ? `\n  error: ${meta.error}` : ""}`,
+  ].join("\n");
+}
+
+function resultText(r: RunResult, home: string): string {
+  if (r.ok) return r.output;
+  return `Task ${r.meta.id} ${r.meta.status}: ${r.meta.error ?? "unknown error"}${r.output ? `\n\nLast output:\n${r.output}` : ""}\n\n${taskSummary(r.meta, home)}`;
+}
 
 export interface PstackOptions {
   /** This package's `skills/` dir. Default: resolved from this file's location. */
@@ -141,6 +184,19 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       .map((s) => [realpathOrSelf(s.file), s.meta.name] as const)
       .filter(([real]) => real.startsWith(skillsRoot) && basename(real) === "SKILL.md"),
   );
+
+  const extensionFile = fileURLToPath(import.meta.url);
+  const agentTypes = loadAgentTypes(resolve(skillsDir, "../agents"));
+  let runner: TaskRunner | undefined;
+  let runnerHome = "";
+  const getRunner = (): TaskRunner => {
+    const home = pstackHome();
+    if (!runner || runnerHome !== home) {
+      runner = new TaskRunner(home, { extensionPath: extensionFile, skillsDir });
+      runnerHome = home;
+    }
+    return runner;
+  };
 
   let state: PstackState = OFF;
   /** Tools this extension registered; their current source is rechecked before toggling. */
@@ -244,9 +300,86 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
           "Launch a subagent for a delegated task. `model` is a Pi id provider/id[:thinking]; omit it (or pass inherit-parent/auto) to use the parent model.",
         parameters: TASK_PARAMS,
         defaultActive: false,
+        async execute(_id, params, signal, onUpdate, ctx) {
+          return runTask(params, signal, onUpdate, ctx);
+        },
+      });
+    } else if (name === "TaskStatus") {
+      pi.registerTool({
+        name,
+        label: "TaskStatus",
+        description: "Show one Task's status, or list the Tasks started by this session. Never resumes or wakes a task.",
+        parameters: TASK_STATUS_PARAMS,
+        defaultActive: false,
         async execute(_id, params, _signal, _onUpdate, ctx) {
-          const gate = taskGate(readModelsRule(pstackHome()), params.model, lookupFromRegistry(ctx.modelRegistry));
-          throw new Error(gate.text);
+          const home = pstackHome();
+          if (params.taskId) {
+            const meta = readMeta(home, params.taskId);
+            if (!meta) throw new Error(`Unknown task "${params.taskId}".`);
+            return { content: [{ type: "text", text: taskSummary(meta, home) }], details: meta };
+          }
+          const sessionId = ctx.sessionManager.getSessionId();
+          const mine = listTasks(home).filter((m) => m.parentSessionId === sessionId);
+          const text = mine.length ? mine.map((m) => taskSummary(m, home)).join("\n") : "No tasks started by this session.";
+          return { content: [{ type: "text", text }], details: { tasks: mine } };
+        },
+      });
+    } else if (name === "TaskOutput") {
+      pi.registerTool({
+        name,
+        label: "TaskOutput",
+        description: "Get a Task's final output. With wait: true, block until it finishes (or timeoutSeconds passes).",
+        parameters: TASK_OUTPUT_PARAMS,
+        defaultActive: false,
+        async execute(_id, params, signal) {
+          const home = pstackHome();
+          const meta = readMeta(home, params.taskId);
+          if (!meta) throw new Error(`Unknown task "${params.taskId}".`);
+          const pending = getRunner().wait(params.taskId);
+          if (pending && params.wait) {
+            const timeout = (params.timeoutSeconds ?? 600) * 1000;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const outcome = await Promise.race([
+              pending,
+              new Promise<"timeout">((r) => (timer = setTimeout(() => r("timeout"), timeout))),
+              new Promise<"aborted">((r) => signal?.addEventListener("abort", () => r("aborted"), { once: true })),
+            ]);
+            clearTimeout(timer);
+            if (outcome === "timeout" || outcome === "aborted") {
+              const now = readMeta(home, params.taskId)!;
+              return { content: [{ type: "text", text: `Still ${now.status} (${outcome}).\n${taskSummary(now, home)}` }], details: now };
+            }
+            return { content: [{ type: "text", text: resultText(outcome, home) }], details: outcome.meta, isError: !outcome.ok };
+          }
+          const now = readMeta(home, params.taskId)!;
+          if (now.status === "running" || now.status === "queued") {
+            return { content: [{ type: "text", text: `Still ${now.status}.\n${taskSummary(now, home)}` }], details: now };
+          }
+          let output = "";
+          try {
+            output = readFileSync(outputPath(home, now.id), "utf8");
+          } catch {}
+          const r: RunResult = { meta: now, output, ok: now.status === "done" };
+          return { content: [{ type: "text", text: resultText(r, home) }], details: now, isError: !r.ok };
+        },
+      });
+    } else if (name === "TaskCancel") {
+      pi.registerTool({
+        name,
+        label: "TaskCancel",
+        description: "Cancel a running or queued Task (SIGTERM, then SIGKILL after 5s).",
+        parameters: TASK_ID_PARAMS,
+        defaultActive: false,
+        async execute(_id, params) {
+          const home = pstackHome();
+          const meta = readMeta(home, params.taskId);
+          if (!meta) throw new Error(`Unknown task "${params.taskId}".`);
+          const pending = getRunner().wait(params.taskId);
+          if (!pending || !getRunner().cancel(params.taskId)) {
+            return { content: [{ type: "text", text: `Task ${meta.id} is not running (status ${meta.status}).` }], details: meta };
+          }
+          const r = await pending;
+          return { content: [{ type: "text", text: `Cancelled.\n${taskSummary(r.meta, home)}` }], details: r.meta };
         },
       });
     } else {
@@ -266,6 +399,104 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     }
   };
 
+  const runTask = async (
+    params: Static<typeof TASK_PARAMS>,
+    signal: AbortSignal | undefined,
+    onUpdate: ((r: { content: { type: "text"; text: string }[]; details: unknown }) => void) | undefined,
+    ctx: ExtensionContext,
+  ) => {
+    const home = pstackHome();
+    const depth = ownDepth() + 1;
+    if (depth > MAX_DEPTH) {
+      throw new Error(`Task nesting limit reached (root plus ${MAX_DEPTH} subagent levels). Do this work yourself instead of delegating.`);
+    }
+    const lookup = lookupFromRegistry(ctx.modelRegistry);
+    const gate = taskGate(readModelsRule(home), params.model, lookup);
+    if (gate.stage !== "ok") throw new Error(gate.text);
+
+    const previous = params.resume ? readMeta(home, params.resume) : undefined;
+    if (params.resume) {
+      if (!previous) throw new Error(`Unknown task "${params.resume}"; cannot resume.`);
+      if (getRunner().isRunning(previous.id) || previous.status === "running" || previous.status === "queued") {
+        throw new Error(`Task ${previous.id} is still running; read its status (TaskStatus / TaskOutput) instead of resuming.`);
+      }
+    }
+    const typeName = params.subagent_type ?? previous?.subagentType ?? "generalPurpose";
+    const agent = agentTypes.find((a) => a.name === typeName);
+    if (!agent) throw new Error(`Unknown subagent_type "${typeName}". Available: ${agentTypes.map((a) => a.name).join(", ")}.`);
+
+    let model: string;
+    let thinking: string | undefined;
+    if (gate.model.kind === "model") {
+      model = `${gate.model.provider}/${gate.model.id}`;
+      thinking = gate.model.level;
+    } else if (previous && params.model === undefined) {
+      model = previous.model;
+      thinking = previous.thinking;
+    } else {
+      if (!ctx.model) throw new Error("No parent model is selected; pass an explicit Task model.");
+      model = `${ctx.model.provider}/${ctx.model.id}`;
+      thinking = pi.getThinkingLevel();
+    }
+
+    const background = params.run_in_background === true;
+    const parentReadonly = process.env.PSTACK_READONLY === "1";
+    let meta: TaskMeta;
+    if (previous) {
+      meta = { ...previous, model, thinking, background, readonly: parentReadonly || (params.readonly ?? previous.readonly), parentSessionId: ctx.sessionManager.getSessionId() };
+    } else {
+      const id = newTaskId();
+      let cwd = ctx.cwd;
+      let worktree: TaskMeta["worktree"];
+      if (params.isolation === "worktree") {
+        worktree = createWorktree(home, id, ctx.cwd);
+        cwd = worktree.path;
+      }
+      meta = {
+        id,
+        parentTaskId: process.env.PSTACK_TASK_ID || undefined,
+        parentSessionId: ctx.sessionManager.getSessionId(),
+        ownerPid: process.pid,
+        depth,
+        description: params.description,
+        subagentType: agent.name,
+        model,
+        thinking,
+        readonly: parentReadonly || params.readonly === true || agent.readonly === true,
+        background,
+        cwd,
+        worktree,
+        environmentNote: params.environment === "cloud" ? CLOUD_NOTE : undefined,
+        status: "queued",
+        runs: 0,
+        createdAt: new Date().toISOString(),
+        usage: emptyUsage(),
+      };
+    }
+    writeMeta(home, meta);
+
+    const done = getRunner().start(meta, agent, params.prompt, previous !== undefined, (p) =>
+      background
+        ? undefined
+        : onUpdate?.({
+            content: [{ type: "text", text: p.text || "(running...)" }],
+            details: { taskId: meta.id, status: "running", toolCalls: p.toolCalls, usage: p.usage },
+          }),
+    );
+    const head = [`taskId: ${meta.id}`, meta.environmentNote ? `environment_note: ${meta.environmentNote}` : "", meta.worktree ? `worktree: ${meta.worktree.path} (branch ${meta.worktree.branch})` : ""].filter(Boolean);
+    if (background) {
+      const text = [...head, "status: running in background", `output: ${outputPath(home, meta.id)}`, "Check with TaskStatus / TaskOutput (wait: true to block). Do not resume a running task."].join("\n");
+      return { content: [{ type: "text" as const, text }], details: { taskId: meta.id, status: "running", background: true } };
+    }
+    const abort = () => getRunner().cancel(meta.id);
+    signal?.addEventListener("abort", abort, { once: true });
+    const r = await done;
+    signal?.removeEventListener("abort", abort);
+    if (!r.ok) throw new Error(resultText(r, home));
+    const text = head.length > 1 ? `${head.slice(1).join("\n")}\n\n${r.output}` : r.output;
+    return { content: [{ type: "text" as const, text }], details: { taskId: meta.id, status: r.meta.status, model: r.meta.model, usage: r.meta.usage, exitCode: r.meta.exitCode } };
+  };
+
   // ---------- events ----------
 
   pi.on("session_start", (_event, ctx) => {
@@ -274,7 +505,12 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     shownHints.clear();
     pendingHints.length = 0;
     reconcile(ctx);
+    // Subagent processes start active: the parent already chose pstack.
+    if (ownDepth() >= 1 && !state.active) setState({ active: true, poteto: false }, ctx);
+    for (const meta of reconcileOrphans(pstackHome())) warn(ctx, `pstack: task ${meta.id} (${meta.description}) ended when its parent Pi exited.`);
   });
+
+  pi.on("session_shutdown", () => runner?.cancelAll());
 
   pi.on("session_tree", (_event, ctx) => reconcile(ctx));
 
@@ -362,6 +598,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       ...(models.length ? models : ["- (none)"]),
       `- Transcripts are Pi JSONL under ${ctx.sessionManager.getSessionDir()}${sessionFile ? ` (this session: ${sessionFile})` : ""}.`,
       '- Everything runs locally: an upstream `environment: "cloud"` request runs as the approved local substitute, with no cloud isolation or survive-shutdown guarantee.',
+      `- Task runs each subagent as a local Pi child process (nesting: root plus ${MAX_DEPTH} levels). Background tasks return a taskId; check them with TaskStatus / TaskOutput (wait: true blocks) and stop them with TaskCancel, never by resuming. \`readonly\` restricts tools; it is not a sandbox. \`isolation: "worktree"\` runs in a fresh git worktree. Background tasks end when this Pi process exits.`,
       "- Bugbot is an external GitHub product, not a tool here.",
     ].join("\n");
   };

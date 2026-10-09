@@ -6,7 +6,6 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   ROLES,
   NOT_CONFIGURED,
-  TASK_NOT_IMPLEMENTED,
   applyBudget,
   applyBudgetToValue,
   formatModelRef,
@@ -241,9 +240,9 @@ describe("Task gate (R7)", () => {
     expect(level.text).toContain("Supported levels: off, minimal, low, medium, high.");
   });
 
-  test("(iii) valid → not implemented, with resolved model", () => {
+  test("(iii) valid → ok, with resolved model", () => {
     for (const m of [undefined, "", "inherit-parent", "auto"]) {
-      expect(taskGate(good, m, lookup)).toEqual({ stage: "not-implemented", text: TASK_NOT_IMPLEMENTED, model: { kind: "parent" } });
+      expect(taskGate(good, m, lookup)).toEqual({ stage: "ok", text: "ok", model: { kind: "parent" } });
     }
     expect(resolveTaskModel("openai/gpt:high", lookup)).toEqual({
       ok: true,
