@@ -314,6 +314,32 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
 
   const activate = (poteto: boolean, ctx: ExtensionContext) => setState({ active: true, poteto: state.poteto || poteto }, ctx);
 
+  // Provenance for the poteto grant. Pi's command context does not say who dispatched a command, and
+  // extension commands run before the input event, so this extension tracks its own model-originated
+  // dispatches: the exact text it sends for a model-started loop is marked, and the command or input it
+  // turns into (matched by text, consumed once) is model-originated. A /loop started that way is
+  // model-started too, so nesting does not launder the origin.
+  const modelDispatches: string[] = [];
+  const markModelDispatch = (text: string) => {
+    modelDispatches.push(text.trim());
+  };
+  /** True (and consumes the mark) when `text` is what a model loop just dispatched. */
+  const takeModelDispatch = (text: string): boolean => {
+    const i = modelDispatches.indexOf(text.trim());
+    if (i === -1) return false;
+    modelDispatches.splice(i, 1);
+    return true;
+  };
+  /** The poteto grant: only when the caller is not a model-originated dispatch. */
+  const activateFrom = (wantsPoteto: boolean, byModel: boolean, ctx: ExtensionContext) => {
+    if (wantsPoteto && byModel) {
+      activate(false, ctx);
+      ctx.ui.notify("pstack: /poteto-mode from a model-started loop does not enable poteto mode; run it yourself.", "warning");
+      return;
+    }
+    activate(wantsPoteto, ctx);
+  };
+
   /** Name of the own skill that Pi's `/skill:<name>` resolves to, or undefined (unknown or another package's skill). */
   const resolveSkillCommand = (name: string): string | undefined => {
     const command = pi.getCommands().find((c) => c.source === "skill" && c.name === `skill:${name}`);
@@ -515,7 +541,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
           if (/^\/(?:skill:)?poteto-mode\b/.test(params.prompt.trim())) {
             throw new Error("LoopStart cannot run /poteto-mode: poteto mode is enabled only by the user.");
           }
-          const loop = startLoop(params.prompt, intervalMs, ctx);
+          const loop = startLoop(params.prompt, intervalMs, ctx, true);
           return { content: [{ type: "text", text: `Loop ${loop.id} started (${formatInterval(intervalMs)}).` }], details: loop };
         },
       });
@@ -859,13 +885,15 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     live.scheduledMs = undefined;
     pi.sendMessage({ customType: LOOP_TICK_MESSAGE, content: `/loop ${id} tick ${live.ticks}`, display: true, details: { loopId: id, tick: live.ticks } });
     // The prompt goes in unchanged so `/how …` or `/skill:…` still expand.
+    // A model-started loop's text is marked so the command/input it becomes cannot carry a user grant.
+    if (live.loop.byModel) markModelDispatch(live.loop.prompt);
     pi.sendUserMessage(live.loop.prompt, { expandPromptTemplates: true });
     // Fixed loops re-arm now. Dynamic loops get a fallback wake in case the prompt starts no run
     // (an extension command, a failed dispatch); agent_settled replaces it with the scheduled delay.
     armLoop(live, live.loop.intervalMs ?? DYNAMIC_DEFAULT_MS);
   };
 
-  const startLoop = (prompt: string, intervalMs: number | undefined, ctx: ExtensionContext): Loop => {
+  const startLoop = (prompt: string, intervalMs: number | undefined, ctx: ExtensionContext, byModel: boolean): Loop => {
     activate(false, ctx);
     const loop: Loop = {
       id: `l${Date.now().toString(36)}${(loopSeq++).toString(36)}${Math.random().toString(36).slice(2, 5)}`,
@@ -873,6 +901,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       ...(intervalMs === undefined ? {} : { intervalMs }),
       sessionId: ctx.sessionManager.getSessionId(),
       createdAt: new Date().toISOString(),
+      ...(byModel ? { byModel: true } : {}),
     };
     recordLoop({ op: "add", loop });
     const live: LiveLoop = { loop, ticks: 0, skipped: 0, due: false, inFlight: false };
@@ -997,11 +1026,12 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
   });
 
   pi.on("input", (event, ctx) => {
+    const byModel = takeModelDispatch(event.text);
     if (event.text.startsWith("/skill:")) {
       const space = event.text.indexOf(" ");
       const name = space === -1 ? event.text.slice(7) : event.text.slice(7, space);
       const own = resolveSkillCommand(name);
-      if (own) activate(own === POTETO_SKILL, ctx);
+      if (own) activateFrom(own === POTETO_SKILL, byModel, ctx);
     }
     // Cursor: a new user message on a paused goal re-activates it. Commands (/goal pause …) are not messages.
     if (goal?.status === "paused" && event.source !== "extension" && !event.text.startsWith("/")) {
@@ -1162,6 +1192,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
         description: "pstack: /loop [interval] <prompt> | <prompt> every <interval> | list | stop [id|all]",
         handler: async (args, cmdCtx) => {
           lastCtx = cmdCtx;
+          const byModel = takeModelDispatch(args.trim() ? `/loop ${args}` : "/loop");
           const text = args.trim();
           if (text === "list") {
             cmdCtx.ui.notify(`pstack loops:\n${loopListText()}`, "info");
@@ -1183,7 +1214,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
             cmdCtx.ui.notify(`pstack: ${parsed.error}`, "warning");
             return;
           }
-          const loop = startLoop(parsed.prompt, parsed.intervalMs, cmdCtx);
+          const loop = startLoop(parsed.prompt, parsed.intervalMs, cmdCtx, byModel);
           cmdCtx.ui.notify(`pstack: loop ${loop.id} started (${formatInterval(loop.intervalMs)}): ${loop.prompt}`, "info");
         },
       }),
@@ -1193,13 +1224,16 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
         pi.registerCommand(meta.name, {
           description: `pstack: run skill ${meta.name}`,
           handler: async (args, cmdCtx) => {
+            const byModel = takeModelDispatch(args.trim() ? `/${meta.name} ${args}` : `/${meta.name}`);
             if (resolveSkillCommand(meta.name) !== meta.name) {
               cmdCtx.ui.notify(`pstack: Pi does not resolve /skill:${meta.name} to this package's skill (is its skills dir loaded?).`, "error");
               return;
             }
-            activate(meta.name === POTETO_SKILL, cmdCtx);
+            activateFrom(meta.name === POTETO_SKILL, byModel, cmdCtx);
             const text = args.trim() ? `/skill:${meta.name} ${args.trim()}` : `/skill:${meta.name}`;
             // expandPromptTemplates routes the text through Pi's own /skill: expansion, so the block is identical.
+            // The forwarded /skill: input keeps this command's origin.
+            if (byModel) markModelDispatch(text);
             pi.sendUserMessage(text, cmdCtx.isIdle() ? { expandPromptTemplates: true } : { expandPromptTemplates: true, deliverAs: "followUp" });
           },
         }),

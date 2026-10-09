@@ -72,6 +72,8 @@ export interface Loop {
   intervalMs?: number;
   sessionId: string;
   createdAt: string;
+  /** Started by the model (LoopStart, or a /loop that a model loop dispatched): its ticks never carry a user grant. */
+  byModel?: boolean;
 }
 
 export type LoopEntry =

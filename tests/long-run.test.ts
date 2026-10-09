@@ -47,9 +47,19 @@ function host() {
     getAllTools: () => [...tools.keys()].map((name) => ({ name, sourceInfo: { path: EXT } })),
     getActiveTools: () => [...active],
     setActiveTools: (n: string[]) => (active = [...n]),
-    getCommands: () => [],
+    // Pi's skill commands for this package's skills (registerCommands skips names already taken, so only skill: entries).
+    getCommands: () => [{ name: "skill:poteto-mode", source: "skill", sourceInfo: { path: join(SKILLS, "poteto-mode", "SKILL.md") } }],
     appendEntry: (customType: string, data: unknown) => branch.push({ type: "custom", customType, data }),
-    sendUserMessage: (text: string, options: any) => sentUser.push({ text, options }),
+    // Like Pi's prompt(): extension commands run first (asynchronously), else the text is a message.
+    sendUserMessage: (text: string, options: any) => {
+      sentUser.push({ text, options });
+      if (options?.expandPromptTemplates && text.startsWith("/")) {
+        const space = text.indexOf(" ");
+        const name = space === -1 ? text.slice(1) : text.slice(1, space);
+        const cmd = commands.get(name);
+        if (cmd) void Promise.resolve().then(() => cmd.handler(space === -1 ? "" : text.slice(space + 1), ctx));
+      }
+    },
     sendMessage: (m: any) => sentMessages.push(m),
     getThinkingLevel: () => "off",
   };
@@ -411,5 +421,66 @@ describe("step 4 review fixes", () => {
     await wait(5);
     expect(h.sentUser.map((s) => s.text).sort()).toEqual(["FIRST", "SECOND"]);
     await h.call("LoopStop", { loopId: "all" });
+  });
+});
+
+describe("poteto grant provenance (review #1 root cause)", () => {
+  const potetoOn = (h: ReturnType<typeof host>) => h.branch.filter((e) => e.customType === "pstack-state").at(-1)?.data.poteto === true;
+  const settleMicro = () => new Promise((r) => setTimeout(r, 20));
+
+  test("a model-started loop cannot reach /poteto-mode through a nested /loop", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("pstack", "on");
+    await h.call("LoopStart", { prompt: "/loop 30s /poteto-mode", intervalSeconds: 3600 });
+    await settleMicro();
+    expect(potetoOn(h)).toBe(false);
+    await h.call("LoopStop", { loopId: "all" });
+  });
+
+  test("a model-started loop cannot reach it through /skill:poteto-mode or a direct /poteto-mode", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("pstack", "on");
+    // Bypass the LoopStart prefix check: arm via a nested user-less /loop with a skill form.
+    await h.call("LoopStart", { prompt: "/loop 1h /skill:poteto-mode", intervalSeconds: 3600 });
+    await settleMicro();
+    await h.emit("input", { text: "/skill:poteto-mode", source: "extension" });
+    expect(potetoOn(h)).toBe(false);
+    await h.call("LoopStop", { loopId: "all" });
+  });
+
+  test("the user's own /poteto-mode and /skill:poteto-mode still grant", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.emit("input", { text: "/skill:poteto-mode", source: "interactive" });
+    expect(potetoOn(h)).toBe(true);
+    const h2 = host();
+    await h2.emit("session_start", { reason: "startup" });
+    await h2.command("poteto-mode", "");
+    expect(potetoOn(h2)).toBe(true);
+  });
+
+  test("provenance alone blocks a direct /poteto-mode tick (independent of LoopStart's prefix check)", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("pstack", "on");
+    // A user-less /loop dispatched by a model loop is model-started, so its own /poteto-mode tick is too.
+    await h.call("LoopStart", { prompt: "/loop 1h /poteto-mode now", intervalSeconds: 3600 });
+    await settleMicro();
+    expect(h.sentUser.map((s) => s.text)).toContain("/poteto-mode now");
+    expect(h.sentUser.map((s) => s.text)).toContain("/skill:poteto-mode now");
+    expect(potetoOn(h)).toBe(false);
+    expect(h.branch.filter((e) => e.customType === "pstack-loop" && e.data.op === "add").every((e) => e.data.loop.byModel)).toBe(true);
+    await h.call("LoopStop", { loopId: "all" });
+  });
+
+  test("a user /loop of /poteto-mode is the user's grant", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("loop", "1h /poteto-mode");
+    await settleMicro();
+    expect(potetoOn(h)).toBe(true);
+    await h.command("loop", "stop");
   });
 });

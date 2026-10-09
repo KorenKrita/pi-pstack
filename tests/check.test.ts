@@ -113,4 +113,13 @@ describe("review regressions", () => {
     writeFileSync(join(root, "skills/a/scripts/blob.bin"), Buffer.from([0, 1, 2, 0x7e, 0x2f, 0x2e]));
     expect(checkRepo(root).findings.map((f) => f.file).sort()).toEqual(["skills/a/scripts/bun.lock", "skills/a/scripts/tool.py"]);
   });
+
+  test("checkRepo skips installed node_modules but still flags the same reference in vendored files", () => {
+    const root = mkdtempSync(join(tmpdir(), "pstack-check-"));
+    mkdirSync(join(root, "skills/a/scripts/node_modules/dep/docs"), { recursive: true });
+    writeFileSync(join(root, "skills/a/SKILL.md"), "---\nname: a\ndescription: d\n---\n");
+    writeFileSync(join(root, "skills/a/scripts/node_modules/dep/docs/init.mdx"), "see .cursor/rules/x.mdc");
+    writeFileSync(join(root, "skills/a/scripts/notes.md"), "see .cursor/rules/x.mdc");
+    expect(checkRepo(root).findings.map((f) => f.file)).toEqual(["skills/a/scripts/notes.md"]);
+  });
 });
