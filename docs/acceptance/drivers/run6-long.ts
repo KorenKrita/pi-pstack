@@ -22,7 +22,7 @@ const lines = existsSync(join(cwd, "ticks.txt")) ? readFileSync(join(cwd, "ticks
 check("loop: >=2 ticks within 100s at 30s interval", tk.length >= 2, `ticks=${tk.length} lines=${lines}`);
 check("loop: each tick ran the prompt (ticks.txt lines >= ticks)", lines >= 2, `lines=${lines}`);
 const loopEntries = ((await s.request({ type: "get_entries" })).data.entries as Rec[]).filter((e) => e.customType === "pstack-loop");
-check("loop: start recorded in session entries", loopEntries.some((e) => e.data?.op === "start"), loopEntries.map((e) => e.data?.op).join(","));
+check("loop: start recorded in session entries (op add)", loopEntries.some((e) => e.data?.op === "add"), loopEntries.map((e) => e.data?.op).join(","));
 
 // restart: close the process with the loop active; a new process on the same session restores it
 const sessionFile = (await s.request({ type: "get_state" })).data.sessionFile as string;
@@ -45,17 +45,20 @@ await s.close();
 s = start({ cwd, runDir: join(R, "runs/6-goal"), args: ["--session-dir", sessDir], ui });
 await s.prompt("/goal Create files step1.txt, step2.txt and step3.txt in this directory, each containing its own name. Do exactly one file per turn, then end the turn; when all three exist, call GoalDone.", 900_000);
 const goalEntries = ((await s.request({ type: "get_entries" })).data.entries as Rec[]).filter((e) => e.customType === "pstack-goal");
-const continues = s.records.filter((r) => r.type === "message_start" && r.message?.customType === "pstack-goal-continue").length;
+// Pi persists boundary messages and forwards them over RPC as entry_appended (display:false is not "not streamed").
+const continues = s.records.filter((r) => r.type === "entry_appended" && r.entry?.customType === "pstack-goal-continue").length;
 check("goal: all three files created", ["step1", "step2", "step3"].every((f) => existsSync(join(cwd, f + ".txt"))));
 check("goal: GoalDone called and goal status done", toolStarts(s.records, "GoalDone").length >= 1 && goalEntries.at(-1)?.data?.status === "done", goalEntries.map((e) => e.data?.status).join(","));
 check("goal: continued across turns without user input (goal-continue messages)", continues >= 1, `continues=${continues}`);
 // pause on abort, resume on /goal resume
-await s.prompt("/goal Run `sleep 40` with bash, then create final.txt, then call GoalDone.", 5_000).catch(() => {});
-await s.waitFor((r) => r.type === "tool_execution_start" && r.toolName === "bash", 120_000).catch(() => {});
+// Send without awaiting a short prompt wait, then look for the bash start from this mark on (no missed event).
+const goalMark = s.records.length;
+s.send({ type: "prompt", message: "/goal Run `sleep 40` with bash, then create final.txt, then call GoalDone." });
+await s.waitFor((r) => r.type === "tool_execution_start" && r.toolName === "bash", 120_000, "goal bash start", goalMark);
 await s.request({ type: "abort" }, 60_000);
 await sleep(2000);
 let g = ((await s.request({ type: "get_entries" })).data.entries as Rec[]).filter((e) => e.customType === "pstack-goal").at(-1)?.data;
-check("goal: RPC abort pauses the goal", g?.status === "paused", JSON.stringify(g));
+check("goal: RPC abort (sent while bash ran) pauses the goal before the step finished", g?.status === "paused" && !existsSync(join(cwd, "final.txt")), `${JSON.stringify(g)} abort after bash start; sleep 40 not done`);
 const abortAt = Date.now();
 await sleep(5000);
 check("goal: no continuation after abort", !s.records.some((r) => r.type === "agent_start" && r._t > abortAt));
@@ -73,14 +76,21 @@ await s.waitFor((r) => r.type === "tool_execution_start" && r.toolName === "Task
 await sleep(15_000);
 const tasks = readdirSync(join(HOME, "tasks")).map((d) => JSON.parse(readFileSync(join(HOME, "tasks", d, "meta.json"), "utf8"))).filter((m) => m.description === "abort-me");
 const victim = tasks.at(-1);
+// The child's whole process tree before the abort (child pi → bash → sleep), so the check is scoped to its descendants.
+const tree = (root: number): number[] => {
+  const kids = Bun.spawnSync(["pgrep", "-P", String(root)]).stdout.toString().trim().split("\n").filter(Boolean).map(Number);
+  return [root, ...kids.flatMap(tree)];
+};
+const treeBefore = victim?.pid ? tree(victim.pid) : [];
+const sleepInTree = treeBefore.some((pid) => /\bsleep 120\b/.test(Bun.spawnSync(["ps", "-o", "command=", "-p", String(pid)]).stdout.toString()));
 await s.request({ type: "abort" }, 60_000);
 await p;
 await sleep(3000);
 const after = JSON.parse(readFileSync(join(HOME, "tasks", victim.id, "meta.json"), "utf8"));
 check("abort: foreground Task record cancelled/error after RPC abort", after.status === "cancelled" || after.status === "error", `${victim.id} ${after.status}`);
 check("abort: child pi process killed", !after.pid || Bun.spawnSync(["kill", "-0", String(after.pid)]).exitCode !== 0, `pid=${after.pid}`);
-const sleepers = Bun.spawnSync(["pgrep", "-f", "sleep 120"]).stdout.toString().trim();
-check("abort: no orphan `sleep 120` left", sleepers === "", sleepers);
+const alive = treeBefore.filter((pid) => Bun.spawnSync(["kill", "-0", String(pid)]).exitCode === 0);
+check("abort: the Task child's descendants (incl. its `sleep 120`) are gone", treeBefore.length > 1 && sleepInTree && alive.length === 0, `tree=${treeBefore.join(",")} sleepInTree=${sleepInTree} alive=${alive.join(",")}`);
 await s.close();
 
 // ---- bad model in config ----

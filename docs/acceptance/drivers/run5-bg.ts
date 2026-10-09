@@ -59,26 +59,34 @@ check("resume: foreground resume did not produce a duplicate wake for run 1", id
 mark = s.records.length;
 await s.prompt('Call Task once with run_in_background: true, description "bg-cancel", prompt "Run `sleep 60` with bash, then reply CANCEL-NOT-EXPECTED". Then immediately call TaskCancel on the returned task id. Reply "cancelled" and stop.');
 const idC = taskIdFrom(s.records, mark);
-const cancelled = toolStarts(s.records.slice(mark), "TaskCancel").length > 0;
-const settleC = Date.now();
+const cancelStart = s.records.slice(mark).find((r) => r.type === "tool_execution_start" && r.toolName === "TaskCancel");
+// Window starts at the cancel itself (record index, so same-millisecond events count); the parent turn's own
+// agent_start came before it.
+const cancelIdx = cancelStart ? s.records.indexOf(cancelStart) : -1;
 await sleep(75_000);
 const mC = idC ? meta(idC) : undefined;
-check("cancel: TaskCancel called, record cancelled", cancelled && mC?.status === "cancelled", `${idC} ${mC?.status}`);
+check("cancel: TaskCancel called, record cancelled", cancelIdx >= 0 && mC?.status === "cancelled", `${idC} ${mC?.status}`);
 check("cancel: child process gone", !!mC && (!mC.pid || Bun.spawnSync(["kill", "-0", String(mC.pid)]).exitCode !== 0), `pid=${mC?.pid}`);
-check("cancel: no wake turn after cancel", !s.records.some((r) => r.type === "agent_start" && r._t > settleC + 500), "");
-check("cancel: no 'done' notification (cancel notice at most once)", idC ? notifications(s.records, idC).length <= 1 && !notifications(s.records, idC).some((n) => /CANCEL-NOT-EXPECTED/.test(JSON.stringify(n.message.content))) : false, `n=${idC ? notifications(s.records, idC).length : "?"}`);
+check("cancel: no agent_start from the TaskCancel call on", cancelIdx >= 0 && !s.records.slice(cancelIdx).some((r) => r.type === "agent_start"), cancelIdx >= 0 ? "" : "no TaskCancel record");
+check("cancel: zero completion notifications for the cancelled task (events)", !!idC && notifications(s.records, idC).length === 0, `n=${idC ? notifications(s.records, idC).length : "no task id"}`);
 
 // --- D: /pstack off with a running bg task → no wake ---
 mark = s.records.length;
 await s.prompt('Call Task once with run_in_background: true, description "bg-off", prompt "Run `sleep 20` with bash, then reply OFF-DONE". Reply "launched" and stop.');
 const idD = taskIdFrom(s.records, mark);
+const offMark = s.records.length;
 await s.prompt("/pstack off");
-const offAt = Date.now();
+const offIdx = s.records.findIndex((r, i) => i >= offMark && r._sent?.type === "prompt"); // the off command itself
 await sleep(60_000);
 const mD = idD ? meta(idD) : undefined;
 check("off: bg task still recorded (finished or cancelled)", !!mD && mD.status !== "running", `${idD} ${mD?.status}`);
-check("off: no wake turn after /pstack off", !s.records.some((r) => r.type === "agent_start" && r._t > offAt + 500));
+check("off: no agent_start from /pstack off on", offIdx >= 0 && !s.records.slice(offIdx).some((r) => r.type === "agent_start"), offIdx >= 0 ? "" : "no off record");
+check("off: zero completion notifications for the task (events)", !!idD && notifications(s.records, idD).length === 0, `n=${idD ? notifications(s.records, idD).length : "no task id"}`);
 const entries = (await s.request({ type: "get_entries" })).data.entries as Rec[];
 writeFileSync(join(R, "runs/5-bg/entries.json"), JSON.stringify(entries, null, 2));
+// Persisted side: completion notifications are custom_message entries, customType pstack-task-done, details.taskId.
+const persisted = (id: string) => entries.filter((e) => e.type === "custom_message" && e.customType === "pstack-task-done" && e.details?.taskId === id);
+check("bg: exactly one persisted completion notification for the woken task", !!idA && persisted(idA).length === 1, idA ? `n=${persisted(idA).length}` : "no task id");
+check("cancel/off: zero persisted completion notifications", !!idC && !!idD && persisted(idC).length === 0 && persisted(idD).length === 0, idC && idD ? `cancel=${persisted(idC).length} off=${persisted(idD).length}` : "missing task id");
 await s.close();
 writeFileSync(join(R, "runs/5-results.json"), JSON.stringify(results, null, 2));

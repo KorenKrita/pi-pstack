@@ -23,13 +23,16 @@ const states = entries.filter((e) => e.type === "custom" && e.customType === "ps
 check("poteto: pstack-state poteto=true recorded from the user command", states.some((d) => d.active && d.poteto), JSON.stringify(states));
 const commits = sh(`git log --format=%H%x09%s ${base}..HEAD --reverse`).out.trim().split("\n").filter(Boolean);
 check("poteto: made local commits", commits.length >= 1, commits.map((c) => c.split("\t")[1]).join(" | "));
-// Red→green: find a commit where tests fail (new test, old code) before the fix lands.
+// Red→green: a commit before the fix where `bun test` exits non-zero with a real failure count (N>0 fail),
+// on unchanged src/stats.ts (old code, new test), followed by a later commit that changes src/stats.ts.
 let redCommit = "";
-for (const line of commits) {
+let redIndex = -1;
+for (const [i, line] of commits.entries()) {
   const sha = line.split("\t")[0];
   sh(`git stash -u -q 2>/dev/null; git checkout -q ${sha}`);
   const t = sh("bun test 2>&1");
-  if (t.code !== 0 && !redCommit) redCommit = sha;
+  const oldCode = sh(`git diff --quiet ${base} ${sha} -- src/stats.ts`).code === 0;
+  if (!redCommit && t.code !== 0 && /(^|\n)\s*[1-9]\d* fail\b/.test(t.out) && oldCode) { redCommit = sha; redIndex = i; }
 }
 sh("git checkout -q main");
 const finalTest = sh("bun test 2>&1");
@@ -38,11 +41,10 @@ check("poteto: final tests pass", finalTest.code === 0, finalTest.out.split("\n"
 check("poteto: bug fixed (mean = 2, 3, 5)", value === "2 3 5", value);
 const diff = sh(`git diff --stat ${base}..HEAD`).out;
 check("poteto: fix touches src/stats.ts and adds/changes a test", /stats\.ts/.test(diff) && /test/.test(diff), diff.replace(/\n/g, " "));
-// Failing test proven: either a red commit in history, or the run executed tests that failed before the fix.
+// Failing test proven from history only (a test-output regex would also match a green "0 fail").
 const bashRuns = toolStarts(s.records, "bash").map((r) => String(r.args?.command ?? ""));
-const testRuns = s.records.filter((r) => r.type === "tool_execution_end" && r.toolName === "bash");
-const sawRed = testRuns.some((r) => /\bfail\b|\(fail\)|[1-9]\d* fail/.test(JSON.stringify(r.result?.content ?? "")));
-check("poteto: failing test observed before fix (red commit or red run)", !!redCommit || sawRed, redCommit ? `red commit ${redCommit.slice(0, 7)}` : sawRed ? "red bash run" : "none");
+const fixAfterRed = redIndex >= 0 && commits.slice(redIndex + 1).some((l) => sh(`git diff --quiet ${l.split("\t")[0]}~1 ${l.split("\t")[0]} -- src/stats.ts`).code !== 0);
+check("poteto: red commit (N>0 failing tests on the old code) precedes the fix commit", !!redCommit && fixAfterRed, redCommit ? `red ${redCommit.slice(0, 7)}, fix after: ${fixAfterRed}` : "no red commit");
 check("poteto: no push / PR attempted", !bashRuns.some((c) => /git push|gh pr/.test(c)), `${bashRuns.length} bash calls`);
 writeFileSync(join(R, "runs/1-results.json"), JSON.stringify(results, null, 2));
 writeFileSync(join(R, "runs/1-poteto/git-log.txt"), sh(`git log --stat ${base}..HEAD`).out);

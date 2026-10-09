@@ -38,10 +38,18 @@ export function start(opts: { cwd: string; runDir: string; args?: string[]; ui?:
   });
   const exited = new Promise<number | null>((res) => child.on("exit", (code) => res(code)));
   function send(cmd: Rec) {
-    appendFileSync(log, JSON.stringify({ _sent: cmd, _t: Date.now() }) + "\n");
+    const rec = { _sent: cmd, _t: Date.now() };
+    records.push(rec); // in memory too, so "no prompt was sent" checks see the driver's own commands
+    appendFileSync(log, JSON.stringify(rec) + "\n");
     child.stdin.write(JSON.stringify(cmd) + "\n");
   }
-  function waitFor(pred: (r: Rec) => boolean, timeoutMs: number, label = "event"): Promise<Rec> {
+  /** Wait for a matching record. With `since`, records already received from that index count too
+   * (so an event that arrived before the wait was installed is not missed). */
+  function waitFor(pred: (r: Rec) => boolean, timeoutMs: number, label = "event", since?: number): Promise<Rec> {
+    if (since !== undefined) {
+      const hit = records.slice(since).find((r) => !r._sent && pred(r));
+      if (hit) return Promise.resolve(hit);
+    }
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error(`timeout waiting for ${label}`)), timeoutMs);
       waiters.push({ pred, resolve: (r) => { clearTimeout(t); resolve(r); } });
@@ -88,5 +96,6 @@ export function toolEnds(records: Rec[], name?: string) {
 export const results: { name: string; pass: boolean; detail: string }[] = [];
 export function check(name: string, pass: boolean, detail = "") {
   results.push({ name, pass, detail });
+  if (!pass) process.exitCode = 1; // a driver with any FAIL exits non-zero
   console.log(`${pass ? "PASS" : "FAIL"} ${name}${detail ? " — " + detail : ""}`);
 }
