@@ -66,7 +66,8 @@ if (name) {
   const ends = endsOf(s2.records);
   const runs = toolStarts(s2.records, "bash").map((r) => ({ cmd: String(r.args?.command), end: ends.get(r.toolCallId) })).filter((x) => drivesMean24(x.cmd));
   const good = runs.find((x) => x.end && !x.end.isError);
-  check("verify: fresh session ran the CLI/helper with `mean 2 4` and that call succeeded (same toolCallId)", !!good, (good ?? runs[0])?.cmd.slice(0, 200) ?? "no matching call");
+  // The bash call's own status can be masked (`…; echo "exit=$?"`); the CLI's exit code is proven by the evidence check.
+  check("verify: fresh session executed the CLI/helper with `mean 2 4` (call completed, same toolCallId)", !!good, (good ?? runs[0])?.cmd.slice(0, 200) ?? "no matching call");
   // Evidence produced by this run proves stdout 3 and exit 0 (single transcript or split .stdout/.exit files).
   const fresh: Record<string, string> = {};
   for (const [p, t] of snapshot()) if (before.get(p) !== t && statSync(p).size < 100_000) fresh[p] = readFileSync(p, "utf8");

@@ -66,7 +66,7 @@ Every driver now exits non-zero on any FAIL. Resume under a less-trusted caller 
 | arena: all Tasks completed | driver expected status `completed`; the enum is `done` | all 4 records `done` |
 | verify: fresh session discovers the project skill | first run had no project trust; Pi only loads `.pi/skills` from trusted projects (documented in `docs/security.md`) | re-run with `--approve`: discovered and executed |
 | loop: start recorded | driver looked for op `start`; the entry op is `add` | `add` entry present |
-| goal: goal-continue messages | `display: false` custom messages are not streamed over RPC | the session file holds 2 |
+| goal: goal-continue messages | the driver read only message events; Pi forwards these boundary messages as `entry_appended`, which it did not count | the session file holds 2; the `f91ab84` re-run counts `entry_appended` (17/17) |
 | goal: RPC abort pauses the goal | abort was sent 78 s after the goal had already reached `done` | 6b repeats it with the abort during the goal's bash: PASS |
 | abort: no orphan `sleep 120` | `pgrep -f "sleep 120"` matched an unrelated 17-day-old watch loop on the host | the victim's pid is gone; 6b scopes the check to its own marker and passes |
 | reflect: no cross-workspace glob | the regex matched the `oldText` of an edit that quotes the skill's own "Do not glob across `…/sessions/*/`" line | no read/bash/find used a glob |
