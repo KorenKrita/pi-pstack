@@ -292,3 +292,124 @@ describe("/loop wiring", () => {
     await h.call("LoopStop", { loopId: "all" });
   });
 });
+
+describe("step 4 review fixes", () => {
+  const realSetTimeout = globalThis.setTimeout;
+  beforeEach(() => {
+    (globalThis as any).setTimeout = (fn: any, ms?: number, ...rest: any[]) => realSetTimeout(fn, ms ? ms / 1000 : ms, ...rest);
+  });
+  afterEach(() => {
+    (globalThis as any).setTimeout = realSetTimeout;
+  });
+  const wait = (ms: number) => new Promise((r) => realSetTimeout(r, ms));
+
+  test("#1 LoopStart refuses /poteto-mode; poteto stays off", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("pstack", "on");
+    await expect(h.call("LoopStart", { prompt: "/poteto-mode go", intervalSeconds: 30 })).rejects.toThrow(/only by the user/);
+    await expect(h.call("LoopStart", { prompt: "  /skill:poteto-mode" })).rejects.toThrow(/only by the user/);
+    expect(h.branch.filter((e) => e.customType === "pstack-loop")).toHaveLength(0);
+    expect(h.branch.filter((e) => e.customType === "pstack-state").at(-1).data.poteto).toBe(false);
+  });
+
+  test("#2 session_shutdown clears loop timers without stop records; stale ctx never throws", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("loop", "30s check");
+    await wait(5);
+    const n = h.sentUser.length;
+    await h.emit("session_shutdown", { reason: "reload" });
+    // The disposed runtime must not touch the stale ctx at all (try/catch is only a backstop).
+    let touched = 0;
+    h.ctx.isIdle = () => {
+      touched++;
+      throw new Error("stale ctx");
+    };
+    await wait(80);
+    expect(touched).toBe(0);
+    expect(h.sentUser.length).toBe(n);
+    expect(h.branch.filter((e) => e.customType === "pstack-loop" && e.data.op === "stop")).toHaveLength(0);
+  });
+
+  test("#3 Esc (agent_settled aborted, no before_settle) pauses the goal before any wake-up", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("goal", "g");
+    await h.emit("agent_settled", { aborted: true });
+    expect(goalOf(h)).toMatchObject({ status: "paused", note: "paused: the run was aborted" });
+    expect(await h.settle()).toBeUndefined();
+  });
+
+  test("#4 goal continuation keeps entries proposed by earlier handlers", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("goal", "g");
+    const other = { type: "custom_message", customType: "other-checkpoint", content: "x", display: false };
+    const r = await h.settle("completed", { entries: [other] });
+    expect(r.entries.map((e: any) => e.customType)).toEqual(["other-checkpoint", GOAL_CONTINUE_MESSAGE]);
+  });
+
+  test("#5 session_tree rebuilds loops from the selected branch", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("pstack", "on");
+    const before = h.branch.length;
+    await h.command("loop", "30s on-old-branch");
+    await wait(5);
+    // Navigate to a point before the loop existed.
+    const saved = h.branch.splice(before);
+    await h.emit("session_tree", {});
+    const n = h.sentUser.length;
+    await wait(80);
+    expect(h.sentUser.length).toBe(n);
+    // And back: the loop is live again.
+    h.branch.push(...saved);
+    await h.emit("session_tree", {});
+    await wait(80);
+    expect(h.sentUser.length).toBeGreaterThan(n);
+    await h.command("loop", "stop");
+  });
+
+  test("#6 an overdue dynamic deadline is not replayed on resume", async () => {
+    const h = host();
+    h.branch.push({ type: "custom", customType: "pstack-state", data: { active: true, poteto: false } });
+    h.branch.push({ type: "custom", customType: "pstack-loop", data: { op: "add", loop: { id: "lx", prompt: "dyn", sessionId: "s1", createdAt: "" } } });
+    h.branch.push({ type: "custom", customType: "pstack-loop", data: { op: "schedule", id: "lx", nextAt: Date.now() - 3_600_000 } });
+    await h.emit("session_start", { reason: "resume" });
+    await wait(60);
+    expect(h.sentUser).toHaveLength(0);
+    await wait(600); // default 10 min, scaled
+    expect(h.sentUser).toHaveLength(1);
+    await h.command("loop", "stop");
+  });
+
+  test("#7 a dynamic tick that starts no run still re-arms (fallback wake)", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("loop", "/pstack status");
+    await wait(5);
+    expect(h.sentUser).toHaveLength(1);
+    await wait(650); // no agent_settled ever arrives
+    expect(h.sentUser).toHaveLength(2);
+    await h.command("loop", "stop");
+  });
+
+  test("#8 concurrent LoopStart calls get distinct ids", async () => {
+    const h = host();
+    await h.emit("session_start", { reason: "startup" });
+    await h.command("pstack", "on");
+    const realNow = Date.now;
+    Date.now = () => 1_000_000;
+    try {
+      await Promise.all([h.call("LoopStart", { prompt: "FIRST", intervalSeconds: 60 }), h.call("LoopStart", { prompt: "SECOND", intervalSeconds: 60 })]);
+    } finally {
+      Date.now = realNow;
+    }
+    const ids = h.branch.filter((e) => e.customType === "pstack-loop" && e.data.op === "add").map((e) => e.data.loop.id);
+    expect(new Set(ids).size).toBe(2);
+    await wait(5);
+    expect(h.sentUser.map((s) => s.text).sort()).toEqual(["FIRST", "SECOND"]);
+    await h.call("LoopStop", { loopId: "all" });
+  });
+});

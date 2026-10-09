@@ -511,6 +511,10 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
         defaultActive: false,
         async execute(_id, params, _signal, _onUpdate, ctx) {
           const intervalMs = params.intervalSeconds === undefined ? undefined : clampDelayMs(params.intervalSeconds);
+          // Poteto mode is a user grant; a model-started loop must not be a way to switch it on.
+          if (/^\/(?:skill:)?poteto-mode\b/.test(params.prompt.trim())) {
+            throw new Error("LoopStart cannot run /poteto-mode: poteto mode is enabled only by the user.");
+          }
           const loop = startLoop(params.prompt, intervalMs, ctx);
           return { content: [{ type: "text", text: `Loop ${loop.id} started (${formatInterval(intervalMs)}).` }], details: loop };
         },
@@ -796,7 +800,8 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     if (decision.kind === "continue") {
       return {
         continue: true,
-        entries: [{ type: "custom_message" as const, customType: GOAL_CONTINUE_MESSAGE, content: GOAL_CONTINUE_TEXT, display: false }],
+        // Pi replaces the boundary's entries with ours, so keep what earlier handlers proposed.
+        entries: [...event.entries, { type: "custom_message" as const, customType: GOAL_CONTINUE_MESSAGE, content: GOAL_CONTINUE_TEXT, display: false }],
       };
     }
   });
@@ -820,6 +825,9 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     inFlight: boolean;
   }
   const loops = new Map<string, LiveLoop>();
+  let loopSeq = 0;
+  /** Set at session_shutdown: the runtime is being replaced, so stale timers must do nothing. */
+  let disposed = false;
 
   const recordLoop = (entry: LoopEntry) => pi.appendEntry(LOOP_ENTRY, entry);
 
@@ -832,14 +840,18 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
 
   const fireLoop = (id: string) => {
     const live = loops.get(id);
-    if (!live) return;
+    if (!live || disposed) return;
     live.timer = undefined;
     const ctx = lastCtx;
     if (!ctx || !state.active) return;
-    if (!ctx.isIdle() || ctx.hasPendingMessages()) {
-      live.skipped++;
-      live.due = true;
-      return;
+    try {
+      if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+        live.skipped++;
+        live.due = true;
+        return;
+      }
+    } catch {
+      return; // stale context after a reload: the new runtime restores loops itself
     }
     live.due = false;
     live.ticks++;
@@ -848,13 +860,15 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     pi.sendMessage({ customType: LOOP_TICK_MESSAGE, content: `/loop ${id} tick ${live.ticks}`, display: true, details: { loopId: id, tick: live.ticks } });
     // The prompt goes in unchanged so `/how …` or `/skill:…` still expand.
     pi.sendUserMessage(live.loop.prompt, { expandPromptTemplates: true });
-    if (live.loop.intervalMs !== undefined) armLoop(live, live.loop.intervalMs);
+    // Fixed loops re-arm now. Dynamic loops get a fallback wake in case the prompt starts no run
+    // (an extension command, a failed dispatch); agent_settled replaces it with the scheduled delay.
+    armLoop(live, live.loop.intervalMs ?? DYNAMIC_DEFAULT_MS);
   };
 
   const startLoop = (prompt: string, intervalMs: number | undefined, ctx: ExtensionContext): Loop => {
     activate(false, ctx);
     const loop: Loop = {
-      id: `l${Date.now().toString(36)}`,
+      id: `l${Date.now().toString(36)}${(loopSeq++).toString(36)}${Math.random().toString(36).slice(2, 5)}`,
       prompt,
       ...(intervalMs === undefined ? {} : { intervalMs }),
       sessionId: ctx.sessionManager.getSessionId(),
@@ -882,15 +896,22 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     for (const id of [...loops.keys()]) stopLoop(id);
   };
 
-  /** Re-arm this session's loops after a resume/reload; missed ticks are not replayed. */
-  const restoreLoops = (ctx: ExtensionContext) => {
+  const clearLoopTimers = () => {
     for (const live of loops.values()) if (live.timer) clearTimeout(live.timer);
     loops.clear();
+  };
+
+  /** Rebuild live loops from the selected branch (resume, reload, tree navigation); records nothing.
+   * A deadline that passed while Pi was closed is a missed tick: it is not replayed, the next one is
+   * a full interval (or the default dynamic delay) from now. */
+  const restoreLoops = (ctx: ExtensionContext) => {
+    clearLoopTimers();
+    const now = Date.now();
     for (const { loop, nextAt } of loopsFromBranch(ctx.sessionManager.getBranch(), ctx.sessionManager.getSessionId())) {
       const live: LiveLoop = { loop, ticks: 0, skipped: 0, due: false, inFlight: false };
       loops.set(loop.id, live);
-      const delay = Math.max(0, (nextAt ?? Date.now() + (loop.intervalMs ?? DYNAMIC_DEFAULT_MS)) - Date.now());
-      armLoop(live, delay);
+      const full = loop.intervalMs ?? DYNAMIC_DEFAULT_MS;
+      armLoop(live, nextAt !== undefined && nextAt > now ? nextAt - now : full);
     }
   };
 
@@ -899,6 +920,8 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       if (live.inFlight) {
         live.inFlight = false;
         if (live.loop.intervalMs === undefined) {
+          // Replaces the fallback wake; a fallback that fired during the run is not a second tick.
+          live.due = false;
           const delay = live.scheduledMs ?? DYNAMIC_DEFAULT_MS;
           armLoop(live, delay);
           recordLoop({ op: "schedule", id: live.loop.id, nextAt: live.nextAt! });
@@ -937,13 +960,22 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     restoreLoops(ctx);
   });
 
-  pi.on("agent_settled", (_event, ctx) => {
+  pi.on("agent_settled", (event, ctx) => {
     lastCtx = ctx;
+    // Esc skips agent_before_settle (Pi only emits agent_settled with aborted: true), so pause here
+    // before a notification or loop tick could start a run the goal would continue.
+    if (event.aborted && goal?.status === "active") {
+      setGoal({ ...goal, status: "paused", note: "paused: the run was aborted", since: new Date().toISOString() }, ctx);
+      ctx.ui.notify("pstack: goal paused (run aborted). Send a message or /goal resume to continue.", "info");
+    }
     flushNotifications(ctx);
     onSettledLoops();
   });
 
   pi.on("session_shutdown", async () => {
+    // Reload / session switch: drop timers without stop records so the next runtime restores them.
+    disposed = true;
+    clearLoopTimers();
     await runner?.cancelAll();
   });
 
@@ -958,7 +990,11 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     });
   }
 
-  pi.on("session_tree", (_event, ctx) => reconcile(ctx));
+  pi.on("session_tree", (_event, ctx) => {
+    reconcile(ctx);
+    lastCtx = ctx;
+    restoreLoops(ctx);
+  });
 
   pi.on("input", (event, ctx) => {
     if (event.text.startsWith("/skill:")) {
