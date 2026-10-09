@@ -1,6 +1,6 @@
 # Step 5 acceptance: real Pi, Git install
 
-Date: 2026-10-09. Package commit under test: `e650f293573bed20817e614703f154b8afb33e1a` (installed with `pi install git:github.com/KorenKrita/pi-pstack`; `git rev-parse HEAD` in the installed clone checked). Pi `1.1.0`, Bun `1.4.2`, macOS arm64.
+Date: 2026-10-09. Package commits under test: `e650f293573bed20817e614703f154b8afb33e1a` for the first full run, then `f91ab84` and `c4d94b7` for the re-runs after the review (each installed with `pi install` / `pi update --extensions` from `git:github.com/KorenKrita/pi-pstack`; `git rev-parse HEAD` in the installed clone checked). Pi `1.1.0`, Bun `1.4.2`, macOS arm64.
 
 ## Environment
 
@@ -13,7 +13,7 @@ Date: 2026-10-09. Package commit under test: `e650f293573bed20817e614703f154b8af
 
 ## Results
 
-108 assertions: 100 PASS, 8 FAIL. All 8 FAILs were driver mistakes (wrong field values, or a check against the wrong process). Each was re-checked against the artifacts; see [Driver FAILs](#driver-fails). No plugin bug was found, so the code is unchanged and every item ran against `e650f29`.
+First run, against `e650f29`: 108 assertions, 100 PASS, 8 FAIL. All 8 FAILs were driver mistakes (wrong field values, or a check against the wrong process); each was re-checked against the artifacts, see [Driver FAILs](#driver-fails). That run found no plugin bug. The independent review and the re-runs after it did find plugin bugs; see [Re-runs after the step 5 review](#re-runs-after-the-step-5-review). The table below is the `e650f29` run.
 
 | # | Scenario | Key evidence | Result |
 |---|---|---|---|
@@ -40,6 +40,24 @@ Date: 2026-10-09. Package commit under test: `e650f293573bed20817e614703f154b8af
 | 7 | Orchestrate (poteto-mode, two units) | `orch.ts` CLI used against `$PSTACK_HOME/projects/<workspace>/orchestrate/calc-fixture/` (`frontier.json`, `decisions.tsv`, …); 2 depth-1 Tasks `done`; both units integrated, 8 tests pass | PASS |
 | 7 | `/create-skill` (release-notes) | `.pi/skills/release-notes/SKILL.md` with name and description; tested in 3 clean `Task` children (two runs plus one re-test after an iteration) whose briefs name the new SKILL.md | PASS |
 | 8 | `Task` with `isolation: "worktree"` | record `worktree = {$PSTACK_HOME/worktrees/<id>, pstack/<id>}`; child cwd = worktree; child's commit `wt: add marker` on `pstack/<id>`; parent still on `main`, clean, no new file; worktree kept (`git worktree list`) | PASS |
+
+### Re-runs after the step 5 review
+
+The review ([`docs/reviews/step5.md`](../reviews/step5.md)) made the drivers stricter and found plugin bugs. The affected drivers were re-run, each against the commit installed with `pi update --extensions` (HEAD of the installed clone checked). Counts are per commit and are not added to the 108 above.
+
+| Commit | Driver | Result | Notes |
+|---|---|---|---|
+| `e650f29` | `run9-mcp.ts` (MCP parity, new) | 3 FAIL | Reproduced review 5.1: the child connected `blocked` (disabled by the project) and missed `projonly` |
+| `f91ab84` | `run1-poteto.ts` | 7/7 | Red commit proven from history (`bun test` exits non-zero with `N>0 fail` on the old code) |
+| `f91ab84` | `run5-bg.ts` | 20/20 | Earlier window checks (from the prompt settling); superseded by the `c4d94b7` row |
+| `f91ab84` | `run6-long.ts` | 17/17 | Goal continuation counted from `entry_appended`; abort during the goal's bash; Task child's process tree gone. Ran in parallel with `run5`; its wrong-config step rewrites the shared model rule, so the two should run serially (the `c4d94b7` `run5` ran alone) |
+| `f91ab84` | `run9-mcp.ts` | 8/8 | Same cwd: the child reaches `allowed` + `projonly`, not `blocked`; a model-authored `/poteto-mode` Task prompt does not grant poteto |
+| `f91ab84` | `run4-verify.ts` | 5/8 | Plugin bug: the generated skill's unquoted `description` contained `: `, Pi skipped it (`Nested mappings are not allowed in compact mappings`). The other 2 FAILs were the driver assuming the earlier evidence layout. Fixed in `575eb23` (sync rules) and `c4d94b7` (driver) |
+| `c4d94b7` | `run4-verify.ts` | 8/8 | New skill `verify-calc-fixture` with a folded `description: >`; fresh session discovers it, runs `bun src/cli.ts mean 2 4` successfully, and evidence written by the run proves stdout `3`, exit 0 |
+| `c4d94b7` | `run9-mcp.ts` | 11/11 | Adds `isolation: "worktree"`: the worktree holds a copy of the parent's untracked `.pi/mcp.json`; the child called only `mcp__allowed__ping` and `mcp__projonly__ping` |
+| `c4d94b7` | `run5-bg.ts` | 20/20 | No-wake windows start at the `TaskCancel` / `/pstack off` record; notifications matched on `details.taskId` |
+
+Every driver now exits non-zero on any FAIL. Resume under a less-trusted caller is covered by unit test only (`review 5.1`), not by a real-Pi run. The worktree copy of `.pi/mcp.json` appears untracked (`?? .pi/`) in the worktree's `git status` unless the repo ignores it, just as it does in the parent checkout.
 
 ### Driver FAILs
 

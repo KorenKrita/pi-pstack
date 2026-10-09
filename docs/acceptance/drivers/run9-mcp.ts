@@ -33,6 +33,24 @@ if (m) {
   check("mcp child: did not reach the server the project disabled", !/PONG-blocked/.test(events) && !/mcp__blocked__/.test(events), "");
 }
 
+// Review 5.5: with isolation "worktree" the child runs in a fresh worktree, where the parent's untracked
+// .pi/mcp.json does not exist unless pstack carries it over; the child must still see the parent's servers.
+if (!Bun.spawnSync(["git", "-C", cwd, "rev-parse", "HEAD"]).success) {
+  Bun.spawnSync(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+}
+const beforeW = new Set(metas().map((x) => x.id));
+const sw = start({ cwd, runDir: join(R, "runs/9-mcp-worktree"), args: ["--approve", "--no-session"], ui: () => ({ cancelled: true }) });
+await sw.prompt("/pstack on");
+await sw.prompt(`Call Task once (foreground, agent mode, not readonly, isolation "worktree") with description "mcp-probe-wt" and prompt: "${probe.replace(/"/g, '\\"')}". Then report the Task result verbatim.`, 600_000);
+await sw.close();
+const w = metas().find((x) => !beforeW.has(x.id) && x.description === "mcp-probe-wt");
+check("mcp worktree: Task ran in a pstack worktree", !!w?.worktree && w.cwd === w.worktree.path, w ? `${w.id} ${w.cwd}` : "no task");
+if (w) {
+  const ev = readFileSync(join(HOME, "tasks", w.id, "events.jsonl"), "utf8");
+  check("mcp worktree child: reached allowed and projonly", /PONG-allowed/.test(ev) && /PONG-projonly/.test(ev), "");
+  check("mcp worktree child: did not reach the server the project disabled", !/PONG-blocked/.test(ev) && !/mcp__blocked__/.test(ev), "");
+}
+
 // Review 5.2: a model-authored Task prompt starting with /poteto-mode must not grant poteto in the child.
 const before2 = new Set(metas().map((x) => x.id));
 const s2 = start({ cwd, runDir: join(R, "runs/9-poteto-child"), args: ["--no-session"], ui: () => ({ cancelled: true }) });
