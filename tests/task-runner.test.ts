@@ -1,7 +1,7 @@
 // Step 3: local Task runtime. A fake `pi` (tests/fixtures/fake-pi.ts) stands in for the child process.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -499,7 +499,7 @@ describe("Task tool (T3–T8)", () => {
     expect(execFileSync("git", ["-C", wt, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
   });
 
-  test("review 5.5: a tracked .pi/mcp.json in the worktree is left as committed", async () => {
+  test("review 5.5: an uncommitted edit to a tracked .pi/mcp.json reaches the worktree child, and never gets committed there", async () => {
     const repo = mkdtempSync(join(tmpdir(), "pstack-repo-"));
     const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { stdio: "pipe" });
     git("init", "-q");
@@ -507,12 +507,41 @@ describe("Task tool (T3–T8)", () => {
     writeFileSync(join(repo, ".pi", "mcp.json"), '{"mcpServers":{}}\n');
     git("add", ".pi/mcp.json");
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init");
-    writeFileSync(join(repo, ".pi", "mcp.json"), '{"mcpServers":{"local-edit":{}}}\n');
+    const policy = '{"mcpServers":{"blocked":{"enabled":false}}}\n';
+    writeFileSync(join(repo, ".pi", "mcp.json"), policy); // parent disables a global server, not committed
     const h = makeHost(repo);
     await h.emit("session_start", { reason: "startup" });
     const r = await h.call("Task", { description: "w", prompt: "args", isolation: "worktree" });
     const wt = join(home, "worktrees", r.details.taskId);
-    expect(readFileSync(join(wt, ".pi", "mcp.json"), "utf8")).toBe('{"mcpServers":{}}\n');
+    expect(readFileSync(join(wt, ".pi", "mcp.json"), "utf8")).toBe(policy);
+    const wgit = (...a: string[]) => execFileSync("git", ["-C", wt, ...a], { encoding: "utf8" });
+    expect(wgit("status", "--porcelain")).toBe("");
+    wgit("add", "-A");
+    expect(wgit("diff", "--cached", "--name-only")).toBe("");
+  });
+
+  test("review 5.5: resume re-applies the parent's current .pi/mcp.json to the task's worktree (incl. removal)", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "pstack-repo-"));
+    const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { stdio: "pipe" });
+    git("init", "-q");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init");
+    const h = makeHost(repo);
+    await h.emit("session_start", { reason: "startup" });
+    const r = await h.call("Task", { description: "w", prompt: "args", isolation: "worktree" });
+    const wt = join(home, "worktrees", r.details.taskId);
+    expect(existsSync(join(wt, ".pi", "mcp.json"))).toBe(false);
+    const policy = '{"mcpServers":{"blocked":{"enabled":false}}}\n';
+    mkdirSync(join(repo, ".pi"), { recursive: true });
+    writeFileSync(join(repo, ".pi", "mcp.json"), policy); // added after the task was created
+    await h.call("Task", { description: "w again", prompt: "args", resume: r.details.taskId });
+    expect(readFileSync(join(wt, ".pi", "mcp.json"), "utf8")).toBe(policy);
+    const wgit = (...a: string[]) => execFileSync("git", ["-C", wt, ...a], { encoding: "utf8" });
+    expect(wgit("status", "--porcelain")).toBe("");
+    wgit("add", "-A");
+    expect(wgit("diff", "--cached", "--name-only")).toBe("");
+    rmSync(join(repo, ".pi", "mcp.json")); // the parent drops its policy: the worktree copy goes too
+    await h.call("Task", { description: "w third", prompt: "args", resume: r.details.taskId });
+    expect(existsSync(join(wt, ".pi", "mcp.json"))).toBe(false);
   });
 
   test("unconfigured Task still refuses before spawning", async () => {

@@ -3,7 +3,7 @@
 // Children are owned by the parent Pi process; nothing survives a parent shutdown (local-only design).
 
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
@@ -256,16 +256,36 @@ export function createWorktree(home: string, id: string, cwd: string): { path: s
   const branch = `pstack/${id}`;
   mkdirSync(join(home, "worktrees"), { recursive: true });
   execFileSync("git", ["-C", top, "worktree", "add", "-q", path, "-b", branch, "HEAD"], { stdio: ["ignore", "pipe", "pipe"] });
-  // Pi reads project MCP policy from <cwd>/.pi/mcp.json. An untracked one in the parent checkout is missing from
-  // the fresh worktree, which would let the child connect servers the parent disabled. Copy it when the worktree
-  // has none; ignore rules (.gitignore, global, the shared info/exclude) treat it exactly as in the parent.
-  const mcp = join(cwd, ".pi", "mcp.json"); // the file the parent's Pi read (its cwd); the child runs at `path`
-  const target = join(path, ".pi", "mcp.json");
-  if (existsSync(mcp) && !existsSync(target)) {
-    mkdirSync(join(path, ".pi"), { recursive: true });
-    copyFileSync(mcp, target);
-  }
+  syncWorktreeMcp(cwd, path);
   return { path, branch };
+}
+
+/**
+ * Make `<worktree>/.pi/mcp.json` match the parent's `<parentCwd>/.pi/mcp.json` (content, or absence). Pi reads
+ * project MCP policy from `<cwd>/.pi/mcp.json`; a worktree starts from HEAD, so without this an uncommitted edit,
+ * an untracked file or a local deletion in the parent would not reach the child, which could then connect a
+ * server the parent disabled. The mirror stays out of the worktree's git status and `git add -A`: a tracked
+ * file is marked skip-worktree; an untracked copy sits behind a self-ignoring `.pi/.gitignore`.
+ * Called when the worktree is created and on every resume.
+ */
+export function syncWorktreeMcp(parentCwd: string, worktree: string): void {
+  const src = join(parentCwd, ".pi", "mcp.json");
+  const dir = join(worktree, ".pi");
+  const target = join(dir, "mcp.json");
+  const git = (...a: string[]) => execFileSync("git", ["-C", worktree, ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const tracked = git("ls-files", "--", ".pi/mcp.json").trim() !== "";
+  const want = existsSync(src) ? readFileSync(src, "utf8") : undefined;
+  if (want === undefined) {
+    if (existsSync(target)) rmSync(target);
+  } else {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(target, want);
+  }
+  if (tracked) {
+    git("update-index", "--skip-worktree", "--", ".pi/mcp.json");
+  } else if (want !== undefined && !existsSync(join(dir, ".gitignore"))) {
+    writeFileSync(join(dir, ".gitignore"), "# pstack: copy of the parent checkout's MCP policy, never committed\n/mcp.json\n/.gitignore\n");
+  }
 }
 
 /**

@@ -32,6 +32,7 @@ import {
   MAX_DEPTH,
   TaskRunner,
   createWorktree,
+  syncWorktreeMcp,
   emptyUsage,
   listTasks,
   loadAgentTypes,
@@ -697,6 +698,8 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
         projectTrusted: ctx.isProjectTrusted(),
         parentSessionId: ctx.sessionManager.getSessionId(),
       };
+      // The resuming caller's current project MCP policy, not the one copied when the worktree was made.
+      if (previous.worktree && existsSync(previous.worktree.path)) syncWorktreeMcp(ctx.cwd, previous.worktree.path);
     } else {
       const id = newTaskId();
       let cwd = ctx.cwd;
