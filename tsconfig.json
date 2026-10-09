@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["scripts", "tests"]
+  "include": ["scripts", "tests", "extensions"]
 }

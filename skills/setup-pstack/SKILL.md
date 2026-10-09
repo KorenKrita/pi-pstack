@@ -5,17 +5,17 @@ description: Configure which models pstack uses per role and at what reasoning b
 
 # Setup pstack
 
-Write `~/.pi/pstack/rules/pstack-models.mdc`, an always-applied rule that sets pstack's model per role.
+Write `$PSTACK_HOME/rules/pstack-models.mdc` (default `~/.pi/pstack/rules/pstack-models.mdc`) through the `pstack_config` tool: an always-applied rule that sets pstack's model per role.
 
 ## Steps
 
 ### 1. Detect available models
 
-Enumerate the model slugs you can pass to a `Task` subagent in this session. That is the dependable source. If Cursor also exposes a models API or CLI that lists the user's entitled models, prefer it for completeness. If you cannot detect any, ask the user to paste the slugs they have access to. Never write a real slug you have not confirmed is available. The aliases `inherit-parent` and `auto` are always valid even though they are not detected slugs.
+Use the candidate model list in the pstack adapter note of the system prompt: models with configured credentials in Pi, each with its supported thinking levels. That is the dependable source; do not call `Task` to probe. If the list is empty, ask the user to configure a provider in Pi (log in to a subscription, set an API key, or add a custom provider in `~/.pi/agent/models.json`) and stop. Never write a model id that is not in that list. Values are Pi ids `provider/id` with an optional `:<thinking>` suffix. The aliases `inherit-parent` and `auto` are always valid even though they are not listed models.
 
 ### 2. Load current state
 
-The default role-to-model mapping is the rule shape shown in step 5 below. If `~/.pi/pstack/rules/pstack-models.mdc` already exists, read it and treat its `# budget` line and its role values as the current choices. Otherwise start from those defaults. A line whose role is not in step 5, such as `how critics`, is from a retired role. Drop it.
+Call the `pstack_config` tool with `action: "read"`. It returns the config path (`$PSTACK_HOME/rules/pstack-models.mdc`, default `~/.pi/pstack/rules/pstack-models.mdc`), the parsed `budget` and role values, and a validation report. If the file exists, treat its `# budget` line and its role values as the current choices. Otherwise every role in step 5 starts as needing a choice: pstack ships no default models for Pi, and `inherit-parent` is never assumed silently. A line whose role is not in step 5, such as `how critics`, is from a retired role (the report lists it as unknown). Drop it.
 
 ### 3. Budget, map, and confirm
 
@@ -26,48 +26,48 @@ The default role-to-model mapping is the rule shape shown in step 5 below. If `~
 - `medium — high reasoning`
 - `small — medium reasoning`
 
-**(b) Apply it.** Build the working table from the skill defaults, and on a re-run keep any role you changed by family, list, or alias (`inherit-parent`, `auto`). `unlimited` leaves every effort as in that table. `large`, `medium`, and `small` set the effort token of every real slug, panel entries included, to `xhigh`, `high`, or `medium`. The effort token is the last token, or the one before a trailing `fast`, on the ladder `max` > `xhigh` > `high` > `medium` > `low`. If the result is not a detected slug, use the same family's detected slug with the highest effort at or below the target, else mark the role as needing a choice. `inherit-parent` and `auto` do not change. So `small` turns `claude-opus-5-5-max` into `claude-opus-5-5-medium`, and `grok-4.7-xhigh-fast` into `grok-4.7-medium-fast`.
+**(b) Apply it.** Build the working table from the current choices of step 2; roles without a value stay as needing a choice. On a re-run keep every role's model, list, or alias (`inherit-parent`, `auto`). The budget sets the `:<thinking>` suffix of every real model, panel entries included: `unlimited` keeps each entry's own level (`max` when it has none), and `large`, `medium`, and `small` target `xhigh`, `high`, and `medium`. The ladder is `max` > `xhigh` > `high` > `medium` > `low` > `minimal`. Use the highest level in that model's supported list (adapter note) at or below the target; a model that supports only `off` is written without a suffix. If no supported level is at or below the target, mark the role as needing a choice. `inherit-parent` and `auto` do not change. So `small` turns `<provider>/<id>:max` into `<provider>/<id>:medium`, and under `unlimited` a model whose levels stop at `high` gets `:high`.
 
-**(c) Show the roles and confirm.** Show every role with its model, marking any real slug not in the detected set as needing a choice. Also list each line step 2 dropped. Ask whether to accept as-is or change specific roles, offering the detected models plus `inherit-parent` and `auto` (both mean: this role runs on the parent chat model, which is how Auto users stay on Auto) as the options. Prefer AskQuestion over free text. For panel roles (arena runners, architect runners, interrogate reviewers) the value is a list, and one subagent runs per entry, alias entries included, so the list length sets the count. `arena cross-judge pool` is also a list, but Arena selects one value from it whose model family differs from the parent's when possible. `swarm workers` is the default model for every worker unless a race or comparison assigns another model per arm.
+**(c) Show the roles and confirm.** Show the full table: every role with its value, marking each role that needs a choice and any model not in the adapter-note list. Also list each line step 2 dropped. While any role needs a choice, ask for it, per role or per group: code roles (`feature, refactoring`, `bug-fix`, `perf-issue`, `hillclimb`, `how explorer`, `why investigators`, `swarm workers`), judgment and prose roles (`judgment and prose`, `hardest tasks`, `how explainer`, `why synthesizer`, `reflect judgment, divergent, synthesizer`), reflect tooling (`reflect tooling`), and panels (`arena runners`, `arena cross-judge pool`, `architect runners`, `interrogate reviewers`), where the user also edits panel membership (add, remove, or replace entries). Offer the listed models plus `inherit-parent` and `auto` (both mean: this role runs on the parent chat model) as the options. Then show the full table again and ask whether to accept it as-is or change specific roles. Prefer AskQuestion over free text. For panel roles (arena runners, architect runners, interrogate reviewers) the value is a list, and one subagent runs per entry, alias entries included, so the list length sets the count. `arena cross-judge pool` is also a list, but Arena selects one value from it whose model family differs from the parent's when possible. `swarm workers` is the default model for every worker unless a race or comparison assigns another model per arm.
 
 ### 4. Validate
 
-Every real slug written must be in the detected set. `inherit-parent` and `auto` always pass. If a chosen real slug is not available, stop and ask again.
+`pstack_config` `write` validates before writing: every role in step 5 present, panel lists non-empty, and each value `inherit-parent`, `auto`, or a `provider/id[:level]` that exists in Pi with configured credentials and supports that level. `inherit-parent` and `auto` always pass. If it rejects the config, nothing is written: show the report, ask again for the failing roles, and retry.
 
 ### 5. Write the rule
 
-Write `~/.pi/pstack/rules/pstack-models.mdc` with `alwaysApply: true`, a `# budget` line with the chosen label and its target effort, and one line per role, using the same labels poteto-mode uses. Overwrite the whole file so re-runs stay idempotent. Shape:
+Call the `pstack_config` tool with `action: "write"`, the chosen `budget` name (`unlimited`, `large`, `medium`, or `small`), and `roles`: every role below mapped to its value, as a list of strings for the four panel roles. Do not write the file by hand: the tool picks the path (`$PSTACK_HOME/rules/pstack-models.mdc`, default `~/.pi/pstack/rules/pstack-models.mdc`) and overwrites the whole file atomically, so re-runs stay idempotent. The file has `alwaysApply: true`, a `# budget` line with the chosen budget and its target level, and one line per role, using the same labels poteto-mode uses. Shape (values are placeholders):
 
 ```
 ---
 description: pstack per-role model choices (overrides skill defaults)
 alwaysApply: true
 ---
-# pstack model configuration. One line per role. Delete a line to fall back to the skill default.
+# pstack model configuration. One line per role. Every role is required; re-run /setup-pstack to change it.
 # `inherit-parent` or `auto` as a value: the role runs on the parent chat model (omit Task `model`). Alias entries in a panel list still count toward its fan-out.
 # budget: unlimited (max)
-feature, refactoring: grok-4.7-xhigh-fast
-bug-fix: grok-4.7-xhigh-fast
-perf-issue: grok-4.7-xhigh-fast
-hillclimb: grok-4.7-xhigh-fast
-judgment and prose: claude-opus-5-5-max
-hardest tasks: claude-opus-5-5-max
-how explorer: grok-4.7-xhigh-fast
-how explainer: claude-opus-5-5-max
-why investigators: grok-4.7-xhigh-fast
-why synthesizer: claude-opus-5-5-max
-reflect tooling: gpt-5.6-sol-max
-reflect judgment, divergent, synthesizer: claude-opus-5-5-max
-arena runners: claude-opus-5-5-max, gpt-5.6-sol-max, grok-4.7-xhigh-fast
-arena cross-judge pool: claude-opus-5-5-max, gpt-5.6-sol-max, grok-4.7-xhigh-fast
-swarm workers: grok-4.7-xhigh-fast
-architect runners: claude-opus-5-5-max, gpt-5.6-sol-max, grok-4.7-xhigh-fast
-interrogate reviewers: claude-opus-5-5-max, gpt-5.6-sol-max, grok-4.7-xhigh-fast
+feature, refactoring: <provider>/<id>:<level>
+bug-fix: <provider>/<id>:<level>
+perf-issue: <provider>/<id>:<level>
+hillclimb: <provider>/<id>:<level>
+judgment and prose: <provider>/<id>:<level>
+hardest tasks: <provider>/<id>:<level>
+how explorer: <provider>/<id>:<level>
+how explainer: <provider>/<id>:<level>
+why investigators: <provider>/<id>:<level>
+why synthesizer: <provider>/<id>:<level>
+reflect tooling: <provider>/<id>:<level>
+reflect judgment, divergent, synthesizer: <provider>/<id>:<level>
+arena runners: <provider>/<id>:<level>, <provider>/<id>:<level>, inherit-parent
+arena cross-judge pool: <provider>/<id>:<level>, <provider>/<id>:<level>
+swarm workers: <provider>/<id>:<level>
+architect runners: <provider>/<id>:<level>, <provider>/<id>:<level>, <provider>/<id>:<level>
+interrogate reviewers: <provider>/<id>:<level>, <provider>/<id>:<level>, <provider>/<id>:<level>
 ```
 
 ### 6. Confirm
 
-Tell the user the rule was written and that it applies to new sessions. Re-running this skill updates it.
+Tell the user the rule was written (the path `pstack_config` returned) and that it applies from the next turn, since pstack injects always-applied rules on every turn while active. Re-running this skill updates it.
 
 ### 7. Offer a verification skill (optional)
 

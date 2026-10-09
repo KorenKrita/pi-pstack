@@ -24,6 +24,9 @@
   "devDependencies": {
     "typescript": "^5.6.0",
     "@types/node": "^22.0.0",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "typebox": "*"
   }
 }
