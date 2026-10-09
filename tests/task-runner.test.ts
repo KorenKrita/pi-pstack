@@ -210,7 +210,7 @@ describe("Task tool (T3–T8)", () => {
     expect(seen.cwd.endsWith(cwd.split("/").pop()!)).toBe(true);
   });
 
-  test("review 5.1: the parent's trust decision reaches the child (--approve / --no-approve) and survives resume", async () => {
+  test("review 5.1: the current caller's trust decision reaches the child (--approve / --no-approve), resume included", async () => {
     const h = makeHost();
     await h.emit("session_start", { reason: "startup" });
     h.session.trusted = true;
@@ -219,8 +219,11 @@ describe("Task tool (T3–T8)", () => {
     h.session.trusted = false;
     const u = await h.call("Task", { description: "u", prompt: "args" });
     expect(JSON.parse(text(u)).args).toContain("--no-approve");
+    // Created trusted, resumed by an untrusted caller: the caller's decision wins, not the stored one.
     const again = await h.call("Task", { description: "t again", prompt: "args", resume: r.details.taskId });
-    expect(JSON.parse(text(again)).args).toContain("--approve");
+    const againArgs: string[] = JSON.parse(text(again)).args;
+    expect(againArgs).toContain("--no-approve");
+    expect(againArgs).not.toContain("--approve");
   });
 
   test("review 5.3: builtin:mcp is passed on from its /mcp command before any server has connected", async () => {
@@ -477,6 +480,39 @@ describe("Task tool (T3–T8)", () => {
     const h2 = makeHost(mkdtempSync(join(tmpdir(), "pstack-norepo-")));
     await h2.emit("session_start", { reason: "startup" });
     await expect(h2.call("Task", { description: "w", prompt: "p", isolation: "worktree" })).rejects.toThrow(/needs a git repository/);
+  });
+
+  test("review 5.5: a worktree child sees the parent's untracked .pi/mcp.json (same MCP policy); git sees it as in the parent", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "pstack-repo-"));
+    const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { stdio: "pipe" });
+    git("init", "-q");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init");
+    const policy = '{"mcpServers":{"blocked":{"enabled":false}}}\n';
+    mkdirSync(join(repo, ".pi"), { recursive: true });
+    writeFileSync(join(repo, ".pi", "mcp.json"), policy);
+    writeFileSync(join(repo, ".git", "info", "exclude"), "/.pi/\n"); // the parent ignores it (shared by worktrees)
+    const h = makeHost(repo);
+    await h.emit("session_start", { reason: "startup" });
+    const r = await h.call("Task", { description: "w", prompt: "args", isolation: "worktree" });
+    const wt = join(home, "worktrees", r.details.taskId);
+    expect(readFileSync(join(wt, ".pi", "mcp.json"), "utf8")).toBe(policy);
+    expect(execFileSync("git", ["-C", wt, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
+  });
+
+  test("review 5.5: a tracked .pi/mcp.json in the worktree is left as committed", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "pstack-repo-"));
+    const git = (...a: string[]) => execFileSync("git", ["-C", repo, ...a], { stdio: "pipe" });
+    git("init", "-q");
+    mkdirSync(join(repo, ".pi"), { recursive: true });
+    writeFileSync(join(repo, ".pi", "mcp.json"), '{"mcpServers":{}}\n');
+    git("add", ".pi/mcp.json");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init");
+    writeFileSync(join(repo, ".pi", "mcp.json"), '{"mcpServers":{"local-edit":{}}}\n');
+    const h = makeHost(repo);
+    await h.emit("session_start", { reason: "startup" });
+    const r = await h.call("Task", { description: "w", prompt: "args", isolation: "worktree" });
+    const wt = join(home, "worktrees", r.details.taskId);
+    expect(readFileSync(join(wt, ".pi", "mcp.json"), "utf8")).toBe('{"mcpServers":{}}\n');
   });
 
   test("unconfigured Task still refuses before spawning", async () => {

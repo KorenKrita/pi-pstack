@@ -284,6 +284,23 @@ export const RULES: Rule[] = [
     replace:
       "Tell the user the rule was written (the path `pstack_config` returned) and that it applies from the next turn, since pstack injects always-applied rules on every turn while active.",
   },
+  {
+    id: "verify-skill-valid-yaml",
+    description:
+      "create-verification-skill: Pi skips a skill whose frontmatter is not valid YAML (an unquoted description containing `: ` fails), so require a quoted or folded description and confirm Pi discovers the generated skill.",
+    files: "skills/create-verification-skill/SKILL.md",
+    find: "without frontmatter the skill never registers)",
+    replace:
+      "without frontmatter the skill never registers; the frontmatter must be valid YAML — write the description as a quoted string or a folded `description: >` block, since an unquoted value containing `: ` fails to parse and Pi then skips the skill with only a warning)",
+  },
+  {
+    id: "verify-skill-discovered",
+    description: "create-verification-skill: the execution check also proves Pi registers the generated skill.",
+    files: "skills/create-verification-skill/SKILL.md",
+    find: "Run its own instructions end to end once:",
+    replace:
+      "First confirm Pi registers it: `pi --approve -p --no-session --tools read \"List your available skill names, one per line.\"` from the repo root must list `verify-<app>` (a frontmatter parse error drops it silently). Then run its own instructions end to end once:",
+  },
 ];
 
 /** Bare `.cursor/` references that intentionally survive adaptation. `file` is an output path. */

@@ -693,6 +693,8 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
         depth,
         parentTaskId: process.env.PSTACK_TASK_ID || undefined,
         readonly: parentReadonly || (params.readonly ?? previous.readonly),
+        // The resuming caller's trust decision, not the creator's: a resume never widens project trust.
+        projectTrusted: ctx.isProjectTrusted(),
         parentSessionId: ctx.sessionManager.getSessionId(),
       };
     } else {

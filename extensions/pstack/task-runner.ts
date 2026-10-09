@@ -3,7 +3,7 @@
 // Children are owned by the parent Pi process; nothing survives a parent shutdown (local-only design).
 
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
@@ -256,6 +256,15 @@ export function createWorktree(home: string, id: string, cwd: string): { path: s
   const branch = `pstack/${id}`;
   mkdirSync(join(home, "worktrees"), { recursive: true });
   execFileSync("git", ["-C", top, "worktree", "add", "-q", path, "-b", branch, "HEAD"], { stdio: ["ignore", "pipe", "pipe"] });
+  // Pi reads project MCP policy from <cwd>/.pi/mcp.json. An untracked one in the parent checkout is missing from
+  // the fresh worktree, which would let the child connect servers the parent disabled. Copy it when the worktree
+  // has none; ignore rules (.gitignore, global, the shared info/exclude) treat it exactly as in the parent.
+  const mcp = join(cwd, ".pi", "mcp.json"); // the file the parent's Pi read (its cwd); the child runs at `path`
+  const target = join(path, ".pi", "mcp.json");
+  if (existsSync(mcp) && !existsSync(target)) {
+    mkdirSync(join(path, ".pi"), { recursive: true });
+    copyFileSync(mcp, target);
+  }
   return { path, branch };
 }
 
