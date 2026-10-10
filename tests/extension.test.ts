@@ -513,6 +513,134 @@ describe("AskQuestion (R6)", () => {
     });
   });
 
+  // Real TUI multi-select: one persistent component per question (not a select() re-opened per toggle, which
+  // flickered and reset the cursor to the top), keyboard-driven, and a viewport that fits a short terminal.
+  const KEY = { up: "\x1b[A", down: "\x1b[B", space: " ", enter: "\r", esc: "\x1b" };
+  function tuiUi(rows = 40) {
+    const customs: { lines: (w: number) => string[]; press: (...keys: string[]) => void }[] = [];
+    const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+    const kb = {
+      matches: (data: string, id: string) =>
+        ({ "tui.select.up": KEY.up, "tui.select.down": KEY.down, "tui.select.confirm": KEY.enter, "tui.select.cancel": KEY.esc })[id] === data,
+    };
+    const ctx: any = {
+      hasUI: true,
+      mode: "tui",
+      ui: {
+        select: async () => {
+          throw new Error("TUI multi-select must not use ui.select");
+        },
+        custom: (factory: any) =>
+          new Promise((resolve) => {
+            const tui = {
+              requestRender: () => {},
+              terminal: {
+                get rows() {
+                  return ctx.ui.__rows ?? rows;
+                },
+                columns: 80,
+              },
+            };
+            const c = factory(tui, theme, kb, resolve);
+            customs.push({ lines: (w) => c.render(w), press: (...keys) => keys.forEach((k) => c.handleInput(k)) });
+          }),
+      },
+    };
+    /** Resolves once the n-th (1-based) checklist is on screen. */
+    const shown = async (n: number) => {
+      while (customs.length < n) await new Promise((r) => setTimeout(r, 1));
+      return customs[n - 1]!;
+    };
+    return { ctx, customs, shown };
+  }
+
+  test("TUI multi-select: one persistent component; space toggles, Enter submits, cursor keeps its place", async () => {
+    const ui = tuiUi();
+    const pending = askQuestions({ questions: [{ id: "m", prompt: "Pick many", options, allow_multiple: true }] }, ui.ctx);
+    const c = await ui.shown(1);
+    c.press(KEY.down, KEY.down, KEY.space, KEY.up, KEY.space, KEY.space, KEY.space);
+    expect(c.lines(80).filter((l) => l.includes("[x]")).map((l) => l.trim())).toEqual(["→ [x] 2. Beta", "[x] 3. Gamma"]);
+    c.press(KEY.enter);
+    expect(await pending).toEqual({
+      cancelled: false,
+      answers: [{ id: "m", selected: [{ id: "b", label: "Beta" }, { id: "c", label: "Gamma" }] }],
+    });
+    expect(ui.customs).toHaveLength(1);
+  });
+
+  test("TUI multi-select: 17 options in a short terminal scroll to the last one; lines fit the width", async () => {
+    const many = Array.from({ length: 17 }, (_, i) => ({ id: `o${i + 1}`, label: `local-openai/某个很长的模型名字-${i + 1}` }));
+    const ui = tuiUi(14);
+    const pending = askQuestions(
+      { title: "pstack 设置", questions: [{ id: "m", prompt: "面板成员（多选）".repeat(6), options: many, allow_multiple: true }] },
+      ui.ctx,
+    );
+    const c = await ui.shown(1);
+    expect(c.lines(40).length).toBeLessThanOrEqual(14);
+    c.press(...Array(20).fill(KEY.down), KEY.space);
+    const lines = c.lines(40);
+    expect(lines.length).toBeLessThanOrEqual(14);
+    expect(lines.some((l) => l.includes("→ [x] 17."))).toBe(true);
+    for (const l of lines) expect(Bun.stringWidth(l)).toBeLessThanOrEqual(40);
+    c.press(KEY.enter);
+    expect((await pending).answers[0]!.selected).toEqual([{ id: "o17", label: "local-openai/某个很长的模型名字-17" }]);
+  });
+
+  test("TUI multi-select: long title, narrow and tiny terminal, resize mid-way: hint stays whole, cursor row stays visible", async () => {
+    const many = Array.from({ length: 17 }, (_, i) => ({ id: `o${i + 1}`, label: `model-${i + 1}` }));
+    const ui = tuiUi(10);
+    const pending = askQuestions(
+      { title: "pstack 设置 · 第 5/5 题：跨模型面板".repeat(3), questions: [{ id: "m", prompt: "面板成员".repeat(20), options: many, allow_multiple: true }] },
+      ui.ctx,
+    );
+    const c = await ui.shown(1);
+    const check = (width: number, maxRows: number, cursorLabel: string) => {
+      const lines = c.lines(width);
+      expect(lines.length).toBeLessThanOrEqual(maxRows);
+      for (const l of lines) expect(Bun.stringWidth(l)).toBeLessThanOrEqual(width);
+      const text = lines.join(" ");
+      for (const part of ["Enter submit", "Esc cancel", "selected"]) expect(text.replace(/\s+/g, " ")).toContain(part);
+      expect(lines.some((l) => l.includes(`→ [`) && l.includes(cursorLabel))).toBe(true);
+    };
+    check(30, 10, "1. model-1");
+    c.press(...Array(9).fill(KEY.down));
+    check(30, 10, "10. model-10");
+    // Resize: taller and wider, then very short again.
+    ui.ctx.ui.__rows = 30;
+    check(80, 30, "10. model-10");
+    ui.ctx.ui.__rows = 7;
+    check(24, 7, "10. model-10");
+    c.press(KEY.space, KEY.enter);
+    expect((await pending).answers[0]!.selected).toEqual([{ id: "o10", label: "model-10" }]);
+  });
+
+  test("TUI multi-select: Esc cancels and keeps only answers already submitted; a later multi gets a fresh component", async () => {
+    const ui = tuiUi();
+    const pending = askQuestions(
+      {
+        questions: [
+          { id: "m1", prompt: "First", options, allow_multiple: true },
+          { id: "m2", prompt: "Second", options, allow_multiple: true },
+        ],
+      },
+      ui.ctx,
+    );
+    (await ui.shown(1)).press(KEY.space, KEY.enter);
+    (await ui.shown(2)).press(KEY.space, KEY.esc);
+    expect(await pending).toEqual({ cancelled: true, answers: [{ id: "m1", selected: [{ id: "a", label: "Alpha" }] }] });
+  });
+
+  test("RPC (hasUI but no terminal components): multi-select keeps the select() dialog path", async () => {
+    const pick = (label: string) => (opts: string[]) => opts.find((o) => o.endsWith(label));
+    const ui = scriptedUi([pick("Beta"), "Done"]);
+    ui.ctx.mode = "rpc";
+    ui.ctx.ui.custom = () => {
+      throw new Error("custom() is not available over RPC");
+    };
+    const result = await askQuestions({ questions: [{ id: "m", prompt: "P", options, allow_multiple: true }] }, ui.ctx);
+    expect(result).toEqual({ cancelled: false, answers: [{ id: "m", selected: [{ id: "b", label: "Beta" }] }] });
+  });
+
   test("cancel returns an explicit cancelled result with earlier answers", async () => {
     const ui = scriptedUi(["1. Alpha", undefined]);
     const result = await askQuestions(

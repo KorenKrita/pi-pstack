@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCurrentSystemMessage, getSupportedThinkingLevels, StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import {
   BUDGETS,
@@ -1332,7 +1333,7 @@ export type AskQuestionResult =
 
 export async function askQuestions(
   params: AskQuestionParams,
-  ctx: Pick<ExtensionContext, "hasUI" | "ui">,
+  ctx: Pick<ExtensionContext, "hasUI" | "ui"> & { mode?: ExtensionContext["mode"] },
 ): Promise<AskQuestionResult> {
   if (!ctx.hasUI) {
     throw new Error("AskQuestion needs an interactive UI, which this session does not have. Ask the user the question in plain text instead.");
@@ -1348,21 +1349,79 @@ export async function askQuestions(
       answers.push({ id: q.id, selected: [q.options[index] as { id: string; label: string }] });
       continue;
     }
-    const picked = new Set<number>();
-    const done = "Done";
-    for (;;) {
-      const shown = labels.map((l, i) => `${picked.has(i) ? "[x]" : "[ ]"} ${l}`);
-      const choice = await ctx.ui.select(`${heading}\n(select to toggle, then Done)`, [...shown, done]);
-      if (choice === undefined) return { cancelled: true, answers };
-      if (choice === done) break;
-      const index = shown.indexOf(choice);
-      if (index === -1) return { cancelled: true, answers };
-      if (picked.has(index)) picked.delete(index);
-      else picked.add(index);
-    }
+    // In the terminal UI one persistent checklist handles the whole question. RPC clients only get Pi's dialog
+    // methods (custom() returns undefined there), so they keep the toggle-via-select loop.
+    const picked = ctx.mode === "tui" ? await multiSelectTui(ctx, heading, labels) : await multiSelectDialog(ctx, heading, labels);
+    if (!picked) return { cancelled: true, answers };
     answers.push({ id: q.id, selected: [...picked].sort((a, b) => a - b).map((i) => q.options[i] as { id: string; label: string }) });
   }
   return { cancelled: false, answers };
+}
+
+async function multiSelectDialog(ctx: Pick<ExtensionContext, "ui">, heading: string, labels: string[]): Promise<Set<number> | undefined> {
+  const picked = new Set<number>();
+  const done = "Done";
+  for (;;) {
+    const shown = labels.map((l, i) => `${picked.has(i) ? "[x]" : "[ ]"} ${l}`);
+    const choice = await ctx.ui.select(`${heading}\n(select to toggle, then Done)`, [...shown, done]);
+    if (choice === undefined) return undefined;
+    if (choice === done) return picked;
+    const index = shown.indexOf(choice);
+    if (index === -1) return undefined;
+    if (picked.has(index)) picked.delete(index);
+    else picked.add(index);
+  }
+}
+
+/** A checklist that stays open: ↑↓ move, Space toggles, Enter submits, Esc cancels. The option list scrolls
+ * inside a window sized to the terminal so the last option and the key hint stay reachable. */
+function multiSelectTui(ctx: Pick<ExtensionContext, "ui">, heading: string, labels: string[]): Promise<Set<number> | undefined> {
+  return ctx.ui.custom<Set<number> | undefined>((tui, theme, kb, done) => {
+    const picked = new Set<number>();
+    let cursor = 0;
+    let top = 0;
+    const hint = "↑↓ move · Space toggle · Enter submit · Esc cancel";
+    return {
+      render(width: number): string[] {
+        const w = Math.max(1, width);
+        const fit = (s: string) => truncateToWidth(s, w);
+        const wrap = (s: string) => wrapTextWithAnsi(s, w).map(fit);
+        // Budget from the bottom up: the key hint (wrapped, never cut) and the scroll line always show; the
+        // option window gets at least one row; the title takes what is left (up to 4 lines).
+        const rows = Math.max(3, (tui.terminal?.rows ?? 24) - 4);
+        const hintLines = wrap(theme.fg("dim", `${hint} · ${picked.size} selected`));
+        const scrollRow = labels.length > 1 ? 1 : 0;
+        const titleBudget = Math.max(0, Math.min(4, rows - hintLines.length - scrollRow - 1));
+        const head = heading
+          .split("\n")
+          .flatMap((l) => wrap(theme.fg("accent", theme.bold(l))))
+          .slice(0, titleBudget);
+        const visible = Math.max(1, Math.min(labels.length, rows - head.length - hintLines.length - scrollRow));
+        if (cursor < top) top = cursor;
+        if (cursor >= top + visible) top = cursor - visible + 1;
+        top = Math.min(top, labels.length - visible);
+        const list = labels.slice(top, top + visible).map((l, k) => {
+          const i = top + k;
+          const text = `${picked.has(i) ? "[x]" : "[ ]"} ${l}`;
+          return fit(i === cursor ? theme.fg("accent", `→ ${text}`) : `  ${text}`);
+        });
+        const scroll = labels.length > visible ? [fit(theme.fg("dim", `  (${top + 1}–${top + list.length} of ${labels.length})`))] : [];
+        return [...head, ...list, ...scroll, ...hintLines];
+      },
+      invalidate() {},
+      handleInput(data: string) {
+        if (kb.matches(data, "tui.select.up")) cursor = Math.max(0, cursor - 1);
+        else if (kb.matches(data, "tui.select.down")) cursor = Math.min(labels.length - 1, cursor + 1);
+        else if (matchesKey(data, Key.space)) {
+          if (picked.has(cursor)) picked.delete(cursor);
+          else picked.add(cursor);
+        } else if (kb.matches(data, "tui.select.confirm")) return done(picked);
+        else if (kb.matches(data, "tui.select.cancel")) return done(undefined);
+        else return;
+        tui.requestRender();
+      },
+    };
+  });
 }
 
 // ---------- pstack_config (R5) ----------
