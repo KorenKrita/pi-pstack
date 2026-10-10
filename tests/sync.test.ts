@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { $ } from "bun";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RULES } from "../scripts/rules";
-import { adaptText, readUpstream, shippedSkillNames } from "../scripts/sync";
+import { adaptText, readUpstream, shippedSkillNames, writeOutput } from "../scripts/sync";
 
 async function fixtureRepo() {
   const dir = mkdtempSync(join(tmpdir(), "upstream-"));
@@ -56,4 +56,26 @@ test("every skill is vendored under a pstack- name; rules still match the unpref
   // A path-scoped rule is written against the logical path and still fires for a renamed skill.
   const rule = RULES.find((r) => r.files === "skills/poteto-mode/scripts/worktree-audit.sh")!;
   expect(rule).toBeDefined();
+});
+
+test("writeOutput moves stale generated files to the trash, and refuses before writing when there is no trash command", async () => {
+  const { dir, commit } = await fixtureRepo();
+  const files = await readUpstream(dir, commit);
+  const out = mkdtempSync(join(tmpdir(), "out-"));
+  mkdirSync(join(out, "skills/a"), { recursive: true });
+  writeFileSync(join(out, "skills/a/SKILL.md"), "old unprefixed copy");
+
+  expect(() => writeOutput(out, files, {}, "no-such-trash-cmd")).toThrow(/no `trash` command/);
+  expect(existsSync(join(out, "skills/pstack-a/SKILL.md"))).toBe(false);
+  expect(existsSync(join(out, "skills/a/SKILL.md"))).toBe(true);
+
+  // A stand-in trash that records what it was asked to move, then moves it aside.
+  const bin = mkdtempSync(join(tmpdir(), "bin-"));
+  const log = join(bin, "log");
+  writeFileSync(join(bin, "fake-trash"), `#!/bin/sh\necho "$1" >> ${log}\nmv "$1" "$1.trashed-elsewhere" && mv "$1.trashed-elsewhere" ${bin}/\n`, { mode: 0o755 });
+  expect(writeOutput(out, files, {}, join(bin, "fake-trash"))).toEqual({ written: 3, removed: 1 });
+  expect(readFileSync(log, "utf8").trim()).toBe(join(out, "skills/a/SKILL.md"));
+  expect(existsSync(join(out, "skills/a"))).toBe(false);
+  expect(existsSync(join(out, "skills/pstack-a/SKILL.md"))).toBe(true);
+  expect(writeOutput(out, files, {}, join(bin, "fake-trash"))).toEqual({ written: 0, removed: 0 });
 });

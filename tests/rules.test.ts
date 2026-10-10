@@ -107,4 +107,20 @@ describe("skill namespace", () => {
     );
     expect(hits["skill-namespace"]).toBe(7);
   });
+  test("plain-prose skill references and the principle-* family (real upstream sentences)", () => {
+    const text = [
+      "- `decisions.tsv` is the trail via the show-me-your-work skill.",
+      "Any one-way door goes through the arena skill before the pilot.",
+      "Navigate to a leaf `principle-*` skill whenever you apply that principle.",
+      "how explorer: x; the how and why of it; a skill like arena.",
+    ].join("\n");
+    expect(namespaceSkills(text, new Set(["show-me-your-work", "arena", "how", "why", "principle-prove-it-works"]))).toBe(
+      [
+        "- `decisions.tsv` is the trail via the pstack-show-me-your-work skill.",
+        "Any one-way door goes through the pstack-arena skill before the pilot.",
+        "Navigate to a leaf `pstack-principle-*` skill whenever you apply that principle.",
+        "how explorer: x; the how and why of it; a skill like arena.",
+      ].join("\n"),
+    );
+  });
 });

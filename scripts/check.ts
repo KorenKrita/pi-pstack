@@ -1,7 +1,8 @@
 // Validate the generated skills/ and agents/ trees. Exit 1 on any finding.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { CURSOR_ALLOWLIST, EXTERNAL_SKILLS, isBinary, isValidSkillName, pstackName, stripUrls } from "./rules";
+import { commandName } from "../extensions/pstack/index";
+import { CURSOR_ALLOWLIST, EXTERNAL_SKILLS, isBinary, isValidSkillName, stripUrls } from "./rules";
 
 export type Finding = { file: string; message: string };
 
@@ -63,6 +64,8 @@ export function findSkillRefs(text: string): string[] {
   for (const m of text.matchAll(/\*\*((?:pstack-)?principle-[a-z0-9-]+)\*\*/g)) refs.add(m[1]!);
   for (const m of text.matchAll(/\b[Uu]se \*\*([a-z0-9-]+)\*\* (?:for|whenever|when|to)\b/g)) refs.add(m[1]!);
   for (const m of text.matchAll(/(?<=^|[\s(`"'])\/([a-z][a-z0-9-]+)(?=[\s`"'),.:;]|$)/gm)) refs.add(`/${m[1]!}`);
+  // `/skill:<name>` names the skill itself (placeholders like `<name>` are not matched).
+  for (const m of text.matchAll(/(?<=^|[\s(`"'])\/skill:([a-z][a-z0-9-]+)(?=[\s`"'),.:;]|$)/gm)) refs.add(m[1]!);
   return [...refs];
 }
 
@@ -70,12 +73,14 @@ export function findSkillRefs(text: string): string[] {
 // (e.g. "keep the harness in `/tmp`", "`/skill:<name>`", "`/reload`").
 const SLASH_NOISE = new Set(["tmp", "skill", "reload"]);
 
-/** `known`: skill names on disk (pstack-x, setup-pstack). A `/x` command resolves to the skill it runs. */
+/** `known`: skill names on disk (pstack-x, setup-pstack). A `/x` command must be one the extension registers:
+ * the short name of a known skill (`/how` for `pstack-how`; `/pstack-how` is not a command). */
 export function checkSkillRefs(file: string, text: string, known: Set<string>): Finding[] {
+  const commands = new Set([...known].map(commandName));
   const resolves = (r: string) => {
     if (!r.startsWith("/")) return known.has(r) || r in EXTERNAL_SKILLS;
     const short = r.slice(1);
-    return known.has(pstackName(short)) || short in EXTERNAL_SKILLS || SLASH_NOISE.has(short);
+    return commands.has(short) || short in EXTERNAL_SKILLS || SLASH_NOISE.has(short);
   };
   return findSkillRefs(stripUrls(text))
     .filter((r) => !resolves(r))

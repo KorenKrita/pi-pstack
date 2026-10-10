@@ -62,7 +62,7 @@ const sess = pc ? readdirSync(join(HOME, "tasks", pc.id, "session")).filter((f) 
 const states = sess.flatMap((f) => readFileSync(join(HOME, "tasks", pc!.id, "session", f), "utf8").trim().split("\n").map((l) => JSON.parse(l)))
   .filter((e) => e.type === "custom" && e.customType === "pstack-state").map((e) => e.data);
 const prompt = pc ? readFileSync(join(HOME, "tasks", pc.id, "prompt.md"), "utf8") : "";
-check("poteto child: Task prompt began with the poteto command (Task sends it as /skill:poteto-mode)", /^\/(skill:)?poteto-mode\b/.test(prompt.trim()), prompt.slice(0, 80));
+check("poteto child: Task forwarded /poteto-mode as /skill:pstack-poteto-mode", /^\/skill:pstack-poteto-mode\b/.test(prompt.trim()), prompt.slice(0, 80));
 check("poteto child: child session never recorded poteto=true", states.length > 0 && states.every((d) => d.poteto !== true), JSON.stringify(states));
 check("poteto child: child replied (task done)", pc?.status === "done", `${pc?.status} ${pc?.error ?? ""}`);
 writeFileSync(join(R, "runs/9-results.json"), JSON.stringify(results, null, 2));

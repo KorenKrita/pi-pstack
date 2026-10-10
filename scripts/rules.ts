@@ -422,6 +422,13 @@ export function namespaceSkills(text: string, names: Set<string>, hits: Record<s
       s = sub(/(`)([a-z0-9-]+)(`)/g, s);
       s = sub(/(\/skill:)([a-z0-9-]+)()/g, s);
       s = sub(/((?:\.\.\/)+)([a-z0-9-]+)(\/)/g, s);
+      // Unformatted `the x skill` after a routing verb ("via the show-me-your-work skill"), and the
+      // `principle-*` family glob; both are skill selection, not prose.
+      s = sub(/(\b(?:via|through|per|run|use|Run|Use) the )([a-z0-9-]+)( skill\b)/g, s);
+      s = s.replace(/`principle-\*`/g, () => {
+        count++;
+        return "`pstack-principle-*`";
+      });
       return s.replace(/\0(\d+)\0/g, (_, i: string) => kept[Number(i)]!);
     })
     .join("");

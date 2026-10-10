@@ -42,6 +42,11 @@ describe("skill refs", () => {
     const known = new Set(["pstack-how", "setup-pstack"]);
     expect(checkSkillRefs("f", "the **pstack-how** skill, /how, /setup-pstack, the **babysit** skill, /loop", known)).toEqual([]);
     expect(checkSkillRefs("f", "the **how** skill", known)).toEqual([{ file: "f", message: "unresolved skill reference: how" }]);
+    // Commands use the short name the extension registers: /pstack-how is not a command.
+    expect(checkSkillRefs("f", "/pstack-how", known)).toEqual([{ file: "f", message: "unresolved skill reference: /pstack-how" }]);
+    // /skill:<name> names the skill itself.
+    expect(checkSkillRefs("f", "`/skill:pstack-how` and `/skill:<name>`", known)).toEqual([]);
+    expect(checkSkillRefs("f", "/skill:how", known)).toEqual([{ file: "f", message: "unresolved skill reference: how" }]);
     expect(checkSkillRefs("f", "the **nope** skill", known)).toEqual([{ file: "f", message: "unresolved skill reference: nope" }]);
   });
 });

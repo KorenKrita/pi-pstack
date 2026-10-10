@@ -114,9 +114,35 @@ function normalizeFrontmatterName(path: string, text: string, hits: Record<strin
 async function main() {
   const upstream = await resolveUpstream();
   const files = await readUpstream(upstream);
-  const names = shippedSkillNames(files);
   const hits: Record<string, number> = {};
+  const { written, removed } = writeOutput(root, files, hits);
+
+  console.log(`upstream: ${upstream} @ ${UPSTREAM_COMMIT}`);
+  console.log(`files: ${files.size} vendored, ${written} written, ${removed} stale removed`);
+  console.log("rule hits:");
+  for (const id of [...RULES.map((r) => r.id), "skill-namespace", "frontmatter-name"]) console.log(`  ${String(hits[id] ?? 0).padStart(3)}  ${id}`);
+  const dead = RULES.filter((r) => !hits[r.id]).map((r) => r.id);
+  if (dead.length) console.log(`note: rules with 0 hits: ${dead.join(", ")}`);
+}
+
+/** Write `files` under `root`, then move stale files in OUTPUT_DIRS to the trash. `trashCmd` is for tests. */
+export function writeOutput(
+  root: string,
+  files: Map<string, UpstreamFile>,
+  hits: Record<string, number> = {},
+  trashCmd = "trash",
+): { written: number; removed: number } {
+  const names = shippedSkillNames(files);
   let written = 0;
+
+  // Stale generated files go to the system trash, not rm, so a bad sync stays recoverable. Find them and
+  // check `trash` (macOS 14+ /usr/bin/trash, or e.g. trash-cli) before writing anything.
+  const stale = OUTPUT_DIRS.flatMap((dir) => (existsSync(join(root, dir)) ? walk(join(root, dir)) : [])).filter(
+    (f) => !files.has(relative(root, f)),
+  );
+  if (stale.length && !Bun.which(trashCmd)) {
+    throw new Error(`${stale.length} stale generated file(s) to remove, but no \`trash\` command on PATH; nothing was written.`);
+  }
 
   for (const [dest, file] of files) {
     const target = join(root, dest);
@@ -129,26 +155,12 @@ async function main() {
     chmodSync(target, file.mode);
   }
 
-  let removed = 0;
-  for (const dir of OUTPUT_DIRS) {
-    if (!existsSync(join(root, dir))) continue;
-    for (const f of walk(join(root, dir))) {
-      if (!files.has(relative(root, f))) {
-        // Stale generated files go to the system trash, not rm: a bad sync stays recoverable.
-        const r = Bun.spawnSync(["trash", f]);
-        if (r.exitCode !== 0) throw new Error(`trash ${f} failed: ${r.stderr.toString()}`);
-        removed++;
-      }
-    }
-    pruneEmptyDirs(join(root, dir));
+  for (const f of stale) {
+    const r = Bun.spawnSync([trashCmd, f]);
+    if (r.exitCode !== 0) throw new Error(`trash ${f} failed: ${r.stderr.toString()}`);
   }
-
-  console.log(`upstream: ${upstream} @ ${UPSTREAM_COMMIT}`);
-  console.log(`files: ${files.size} vendored, ${written} written, ${removed} stale removed`);
-  console.log("rule hits:");
-  for (const id of [...RULES.map((r) => r.id), "skill-namespace", "frontmatter-name"]) console.log(`  ${String(hits[id] ?? 0).padStart(3)}  ${id}`);
-  const dead = RULES.filter((r) => !hits[r.id]).map((r) => r.id);
-  if (dead.length) console.log(`note: rules with 0 hits: ${dead.join(", ")}`);
+  for (const dir of OUTPUT_DIRS) if (existsSync(join(root, dir))) pruneEmptyDirs(join(root, dir));
+  return { written, removed: stale.length };
 }
 
 function pruneEmptyDirs(dir: string) {
