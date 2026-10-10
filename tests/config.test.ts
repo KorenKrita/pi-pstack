@@ -283,7 +283,7 @@ describe("generated setup-pstack text (R5)", () => {
 
   test("arena, swarm, interrogate read config through pstack_config, not the default home", () => {
     for (const name of ["arena", "swarm", "interrogate"]) {
-      const skill = readFileSync(join(import.meta.dir, `../skills/${name}/SKILL.md`), "utf8");
+      const skill = readFileSync(join(import.meta.dir, `../skills/pstack-${name}/SKILL.md`), "utf8");
       expect(skill).toContain('`pstack_config` with `action: "read"`');
       expect(skill).not.toContain("~/.pi/pstack/rules/pstack-models.mdc");
       expect(skill).not.toMatch(/claude-opus-5-5-max|gpt-5\.6-sol-max|grok-4\.7-xhigh-fast/);

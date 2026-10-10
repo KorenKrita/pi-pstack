@@ -36,7 +36,9 @@ Input is read from the git tree at the pinned commit (`git ls-tree` / `git cat-f
 
 ## Adaptation rules
 
-Applied in order to every vendored text file (binary files are copied verbatim). URLs (`http(s)://...`) are never rewritten. Model defaults in setup-pstack, arena, swarm, and interrogate are adapted to Pi ids and the shared `pstack_config` tool (rules 16–27); other upstream prose is left alone. Hits are at the pinned commit.
+Applied in order to every vendored text file (binary files are copied verbatim). URLs (`http(s)://...`) are never rewritten. Model defaults in setup-pstack, arena, swarm, and interrogate are adapted to Pi ids and the shared `pstack_config` tool (rules 16–27); other upstream prose is left alone. Hits are at the pinned commit. Rule scopes are written against the upstream path (`skills/<upstream name>/...`).
+
+After these rules, a namespace pass (`namespaceSkills` in `scripts/rules.ts`) renames every skill to `pstack-<name>` (`setup-pstack` keeps its name): the output directory, the frontmatter `name`, and references to a shipped skill as `**x**`, `` `x` ``, `/skill:x`, or a relative `../x/` link. Slash commands (`/x`) keep the short name the extension registers. Upstream-repo paths (`pstack/skills/x/`), URLs, model role keys (`how explorer`, `arena runners`) and three backticked prose words (eval's `arena` keyword, opening-a-pr's `poteto-mode` scope, why's "`why` question") stay. 183 references at the pinned commit; `extras/skills/pstack-create-skill` is a target too.
 
 | # | id | Find | Replace | Scope | Hits | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -74,9 +76,9 @@ Applied in order to every vendored text file (binary files are copied verbatim).
 
 | File | Text | Reason |
 | --- | --- | --- |
-| `skills/poteto-mode/playbooks/worktree-cleanup.md` | `.cursor/worktrees/myrepo/x` | Example of a worktree outside the hand-typed guess; the lesson (read `git worktree list`) is tool-independent. |
+| `skills/pstack-poteto-mode/playbooks/worktree-cleanup.md` | `.cursor/worktrees/myrepo/x` | Example of a worktree outside the hand-typed guess; the lesson (read `git worktree list`) is tool-independent. |
 
-It also validates skill names/descriptions and that every skill reference resolves — `The/the **x** skill`, bold lists (`**a** and **b** principle skills`), `**principle-x**`, `Use **x** for/whenever/when/to`, and `/x` slash commands (bare, backticked, parenthesised, or quoted; `/tmp` is ignored) — to a vendored skill or to `EXTERNAL_SKILLS` (`create-skill`, `babysit`, `loop`, `goal`).
+It also validates skill names/descriptions and that every skill reference resolves — `The/the **x** skill`, bold lists (`**a** and **b** principle skills`), `**principle-x**`, `Use **x** for/whenever/when/to`, and `/x` slash commands (bare, backticked, parenthesised, or quoted; `/tmp` is ignored) — to a shipped skill (by its pstack- name; a `/x` command resolves to `pstack-x` or `setup-pstack`) or to `EXTERNAL_SKILLS` (`babysit`, `loop`, `goal`).
 
 ### Residual Cursor references kept on purpose
 
@@ -104,7 +106,7 @@ Skill text is left as-is except for setup-pstack and the per-role readers (rules
 | **Bugbot** | External GitHub product; the adapter note says so. |
 | **`/loop`**, **`/goal`** commands | Provided as plugin contracts (Cursor's semantics are not public): `/goal` continues normally ended runs until `GoalDone`, pauses on abort/error/blocked; `/loop` sends the prompt unchanged on a fixed or model-scheduled interval, only while Pi runs. Model-facing `GoalSet` / `GoalDone` / `LoopStart` / `LoopStop` / `LoopSchedule`. |
 | **Agent store** ("the current agent's store", orchestrate / multi-phase-plan) | Provided: `$PSTACK_HOME/projects/--<cwd>--/`, named in the adapter note with the `orch.ts --store` invocation. |
-| **create-skill** skill | Provided as a plugin contract (Cursor's text is not public): `extras/skills/create-skill/SKILL.md`, loaded with the package skills and in Task children. Covers what callers ask of it: pin down job/triggers/placement, draft in Agent Skills format, validate, test in clean `Task` children, iterate, and a description-optimization loop (should/should-not-trigger sets judged by clean children). |
+| **create-skill** skill | Provided as a plugin contract (Cursor's text is not public): `extras/skills/pstack-create-skill/SKILL.md` (skill `pstack-create-skill`, command `/create-skill`), loaded with the package skills and in Task children. Covers what callers ask of it: pin down job/triggers/placement, draft in Agent Skills format, validate, test in clean `Task` children, iterate, and a description-optimization loop (should/should-not-trigger sets judged by clean children). |
 | **`mcps/` directory** / available-tools map (`why`) | Provided: Pi's built-in MCP client is the source. The adapter note lists the MCP servers connected now with their tools and how to reach them (codemode / tool_search). Agent-mode Task children get `-e builtin:mcp -e builtin:codemode` when the parent runs them (same `mcp.json` servers); `readonly` children get none ("readonly strips MCPs"). |
 | **babysit** built-in (routed *away* from) | Nothing to provide. |
 

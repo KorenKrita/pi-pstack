@@ -16,7 +16,7 @@ describe("findCursorPaths", () => {
 
   test("ignores Pi paths, identifiers, and allowlisted entries", () => {
     expect(findCursorPaths("skills/a/SKILL.md", "`.pi/skills/` endCursor foo.cursor/bar cursor-team-kit")).toEqual([]);
-    expect(findCursorPaths("skills/poteto-mode/playbooks/worktree-cleanup.md", "at `.cursor/worktrees/myrepo/x`")).toEqual([]);
+    expect(findCursorPaths("skills/pstack-poteto-mode/playbooks/worktree-cleanup.md", "at `.cursor/worktrees/myrepo/x`")).toEqual([]);
     expect(findCursorPaths("skills/other.md", "at `.cursor/worktrees/myrepo/x`")).toHaveLength(1);
   });
 });
@@ -36,11 +36,12 @@ describe("checkSkillFrontmatter", () => {
 describe("skill refs", () => {
   test("extracts bold, principle, and slash refs", () => {
     const refs = findSkillRefs("the **how** skill, **principle-x**, the **y** principle, run `/deslop` or /why. See `/tmp/foo`.");
-    expect(refs.sort()).toEqual(["deslop", "how", "principle-x", "principle-y", "why"].sort());
+    expect(refs.sort()).toEqual(["/deslop", "/why", "how", "principle-x", "pstack-principle-y"].sort());
   });
   test("resolves against vendored + external allowlist", () => {
-    const known = new Set(["how"]);
-    expect(checkSkillRefs("f", "the **how** skill and the **create-skill** skill, /loop", known)).toEqual([]);
+    const known = new Set(["pstack-how", "setup-pstack"]);
+    expect(checkSkillRefs("f", "the **pstack-how** skill, /how, /setup-pstack, the **babysit** skill, /loop", known)).toEqual([]);
+    expect(checkSkillRefs("f", "the **how** skill", known)).toEqual([{ file: "f", message: "unresolved skill reference: how" }]);
     expect(checkSkillRefs("f", "the **nope** skill", known)).toEqual([{ file: "f", message: "unresolved skill reference: nope" }]);
   });
 });
@@ -88,15 +89,15 @@ describe("review regressions", () => {
         "poteto-mode",
         "principle-a",
         "principle-b",
-        "principle-fix-root-causes",
-        "principle-redesign-from-first-principles",
-        "reflect",
+        "pstack-principle-fix-root-causes",
+        "pstack-principle-redesign-from-first-principles",
+        "/reflect",
       ].sort(),
     );
   });
 
   test("replacing a real reference with a missing skill is reported", () => {
-    const known = new Set(["arena", "reflect", "poteto-mode"]);
+    const known = new Set(["arena", "pstack-reflect", "poteto-mode"]);
     for (const text of ["The **missing-skill** skill.", "Use **missing-skill** for x.", '"/missing-skill"', "the **a** and **missing-skill** principle skills"]) {
       const r = checkSkillRefs("f", text, known).map((f) => f.message);
       expect(r.some((m) => m.includes("missing-skill"))).toBe(true);

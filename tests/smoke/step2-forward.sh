@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Step 2 smoke (review item 9): the extension command `/how <args>` must reach the model as the exact
-# same user message as Pi's own `/skill:how <args>` expansion. Uses RPC mode, because in -p/json mode an
+# same user message as Pi's own `/skill:pstack-how <args>` expansion. Uses RPC mode, because in -p/json mode an
 # extension command's sendUserMessage is fire-and-forget and no turn runs.
 # Usage: tests/smoke/step2-forward.sh [model]   (default local-openai/glm-5.3-flash)
 set -euo pipefail
@@ -19,8 +19,8 @@ first_user_message() { # first_user_message <prompt> <out-file>
 }
 
 A=$(first_user_message "/how ARGX1 reply OK only" "$OUT/how.jsonl")
-B=$(first_user_message "/skill:how ARGX1 reply OK only" "$OUT/skill-how.jsonl")
+B=$(first_user_message "/skill:pstack-how ARGX1 reply OK only" "$OUT/skill-how.jsonl")
 FAIL=0
-if [ "$A" != "null" ] && [ "$A" = "$B" ]; then echo "PASS  /how forwards to the identical /skill:how block"; else echo "FAIL  /how vs /skill:how differ"; FAIL=1; fi
-if printf '%s' "$A" | jq -e 'startswith("<skill name=\"how\"") and endswith("ARGX1 reply OK only")' >/dev/null; then echo "PASS  block carries the skill and the arguments"; else echo "FAIL  block shape"; FAIL=1; fi
+if [ "$A" != "null" ] && [ "$A" = "$B" ]; then echo "PASS  /how forwards to the identical /skill:pstack-how block"; else echo "FAIL  /how vs /skill:pstack-how differ"; FAIL=1; fi
+if printf '%s' "$A" | jq -e 'startswith("<skill name=\"pstack-how\"") and endswith("ARGX1 reply OK only")' >/dev/null; then echo "PASS  block carries the skill and the arguments"; else echo "FAIL  block shape"; FAIL=1; fi
 exit $FAIL

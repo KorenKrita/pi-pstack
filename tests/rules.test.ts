@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RULES, applyRules, isValidSkillName, normalizeSkillName, type Rule } from "../scripts/rules";
+import { RULES, applyRules, isValidSkillName, namespaceSkills, normalizeSkillName, pstackName, type Rule } from "../scripts/rules";
 
 describe("applyRules", () => {
   test("specific paths win over the generic fallback", () => {
@@ -78,5 +78,33 @@ describe("review regressions", () => {
     const out = applyRules("skills/a/SKILL.md", "`./.cursor/skills/verify-app/SKILL.md` `../.cursor/skills/x/` `$HOME/.cursor/skills/y/`");
     expect(out).toBe("`./.pi/skills/verify-app/SKILL.md` `../.pi/skills/x/` `$HOME/.pi/agent/skills/y/`");
     expect(findCursorPaths("skills/a/SKILL.md", out)).toEqual([]);
+  });
+});
+
+describe("skill namespace", () => {
+  const names = new Set(["how", "why", "arena", "poteto-mode", "principle-prove-it-works", "setup-pstack", "create-skill"]);
+  test("pstackName prefixes unless the name already says pstack", () => {
+    expect(pstackName("how")).toBe("pstack-how");
+    expect(pstackName("setup-pstack")).toBe("setup-pstack");
+  });
+  test("rewrites skill references, keeps slash commands, prose words and URLs", () => {
+    const text = [
+      "Run the **how** skill, then `why` and `arena`'s Phase A, /how or `/arena`.",
+      "Per [Prove It Works](../principle-prove-it-works/SKILL.md) and [arena](../../arena/SKILL.md), **setup-pstack**.",
+      "Use `/skill:poteto-mode` or /skill:how; the **Feature** playbook; how explorer; `howto`.",
+      "Named `benchmark`, `candidate`, or `arena` in any directory; such as `pstack` or `poteto-mode`, as the scope.",
+      "if the user's `why` question; users often phrase `why` questions. See https://x.dev/skills/how/x and pstack/skills/how/SKILL.md.",
+    ].join("\n");
+    const hits: Record<string, number> = {};
+    expect(namespaceSkills(text, names, hits)).toBe(
+      [
+        "Run the **pstack-how** skill, then `pstack-why` and `pstack-arena`'s Phase A, /how or `/arena`.",
+        "Per [Prove It Works](../pstack-principle-prove-it-works/SKILL.md) and [arena](../../pstack-arena/SKILL.md), **setup-pstack**.",
+        "Use `/skill:pstack-poteto-mode` or /skill:pstack-how; the **Feature** playbook; how explorer; `howto`.",
+        "Named `benchmark`, `candidate`, or `arena` in any directory; such as `pstack` or `poteto-mode`, as the scope.",
+        "if the user's `why` question; users often phrase `why` questions. See https://x.dev/skills/how/x and pstack/skills/how/SKILL.md.",
+      ].join("\n"),
+    );
+    expect(hits["skill-namespace"]).toBe(7);
   });
 });

@@ -359,11 +359,16 @@ describe("Task tool (T3–T8)", () => {
     expect(seen.args.at(-1)).toBe(join(home, "tasks", seen.env.PSTACK_TASK_ID, "system.md"));
   });
 
-  test("review 5.2: a leading own skill command (/how …) goes to the child as /skill:how … (print mode cannot run command handlers that send messages)", async () => {
+  test("review 5.2: a leading own skill command (/how …) goes to the child as /skill:pstack-how … (print mode cannot run command handlers that send messages)", async () => {
     const h = makeHost();
     await h.emit("session_start", { reason: "startup" });
     const r = await h.call("Task", { description: "c", prompt: "/how echo this" });
-    expect(readFileSync(join(home, "tasks", r.details.taskId, "prompt.md"), "utf8").trim()).toBe("/skill:how echo this");
+    expect(readFileSync(join(home, "tasks", r.details.taskId, "prompt.md"), "utf8").trim()).toBe("/skill:pstack-how echo this");
+    const setup = await h.call("Task", { description: "s", prompt: "/setup-pstack" });
+    expect(readFileSync(join(home, "tasks", setup.details.taskId, "prompt.md"), "utf8").trim()).toBe("/skill:setup-pstack");
+    // Already the skill form, or the unprefixed name of another package's skill: passed through unchanged.
+    const user = await h.call("Task", { description: "u", prompt: "/skill:tdd x" });
+    expect(readFileSync(join(home, "tasks", user.details.taskId, "prompt.md"), "utf8").trim()).toBe("/skill:tdd x");
     const other = await h.call("Task", { description: "o", prompt: "echo:/not-a-skill x" });
     expect(text(other)).toBe("/not-a-skill x");
   });

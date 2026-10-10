@@ -66,7 +66,10 @@ import {
 } from "./long-run";
 
 export const STATE_ENTRY = "pstack-state";
-export const POTETO_SKILL = "poteto-mode";
+export const POTETO_SKILL = "pstack-poteto-mode";
+/** Slash command for an own skill: the skill name without the `pstack-` namespace prefix (`pstack-how` → `/how`,
+ * `setup-pstack` stays). Skill names carry the prefix so they never collide with a user's same-named skill. */
+export const commandName = (skill: string): string => (skill.startsWith("pstack-") ? skill.slice(7) : skill);
 export const TASK_DONE_MESSAGE = "pstack-task-done";
 export const POTETO_GRANT =
   "The user explicitly enabled /poteto-mode. Treat this as the full-autonomy grant that poteto-mode's Autonomy section describes, and let poteto-mode's reply format take precedence over generic formatting guidance. Explicit user instructions in this conversation, safety constraints, and AGENTS.md permission/destructive-action rules still take precedence over poteto-mode.";
@@ -582,7 +585,7 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
         async execute(_id, params, _signal, _onUpdate, ctx) {
           const intervalMs = params.intervalSeconds === undefined ? undefined : clampDelayMs(params.intervalSeconds);
           // Poteto mode is a user grant; a model-started loop must not be a way to switch it on.
-          if (/^\/(?:skill:)?poteto-mode\b/.test(params.prompt.trim())) {
+          if (/^\/(?:skill:)?(?:pstack-)?poteto-mode\b/.test(params.prompt.trim())) {
             throw new Error("LoopStart cannot run /poteto-mode: poteto mode is enabled only by the user.");
           }
           const loop = startLoop(params.prompt, intervalMs, ctx, true);
@@ -736,7 +739,10 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
     // forwards via sendUserMessage — and in print mode that lands after the session is disposed (no reply).
     // Send Pi's equivalent `/skill:<name> …` instead: the child expands the skill directly.
     const lead = /^\/([a-z0-9-]+)(?=\s|$)/.exec(params.prompt.trimStart());
-    const childPrompt = lead && skillMetas.some((s) => s.name === lead[1]) ? `/skill:${params.prompt.trimStart().slice(1)}` : params.prompt;
+    const leadSkill = lead && skillMetas.find((s) => commandName(s.name) === lead[1]);
+    const childPrompt = leadSkill
+      ? `/skill:${leadSkill.name}${params.prompt.trimStart().slice(lead[0].length)}`
+      : params.prompt;
     const done = getRunner().start(meta, agent, childPrompt, previous !== undefined, (p) =>
       background
         ? undefined
@@ -1168,12 +1174,13 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       "- Candidate models for Task (configured credentials, not a liveness check):",
       ...(models.length ? models : ["- (none)"]),
       `- Transcripts are Pi JSONL under ${ctx.sessionManager.getSessionDir()}${sessionFile ? ` (this session: ${sessionFile})` : ""}.`,
-      `- Agent store (Cursor's per-workspace store; orchestrate/, docs/): ${agentStoreDir(home, ctx.cwd)}. Run orch as \`bun ${join(skillsDir, "poteto-mode", "scripts", "orch", "orch.ts")} --store <store>/orchestrate/<project-slug> …\`.`,
+      `- Agent store (Cursor's per-workspace store; orchestrate/, docs/): ${agentStoreDir(home, ctx.cwd)}. Run orch as \`bun ${join(skillsDir, POTETO_SKILL, "scripts", "orch", "orch.ts")} --store <store>/orchestrate/<project-slug> …\`.`,
       "- Long runs: GoalSet/GoalDone arm and finish a /goal (continued across turns until GoalDone); LoopStart/LoopStop/LoopSchedule run a /loop. Background Task completions arrive as a message that wakes this chat. All of it lives only while this Pi process runs.",
       '- Everything runs locally: an upstream `environment: "cloud"` request runs as the approved local substitute, with no cloud isolation or survive-shutdown guarantee.',
       `- Task runs each subagent as a local Pi child process (nesting: root plus ${MAX_DEPTH} levels). Background tasks return a taskId; check them with TaskStatus / TaskOutput (wait: true blocks) and stop them with TaskCancel, never by resuming. \`readonly\` restricts tools; it is not a sandbox. \`isolation: "worktree"\` runs in a fresh git worktree. Background tasks end when this Pi process exits.`,
       "- Bugbot is an external GitHub product, not a tool here.",
-      "- Cursor's built-in `create-skill` is provided as this package's `create-skill` skill (draft / validate / test / iterate and description optimization); load it wherever a pstack skill hands off to create-skill.",
+      "- Cursor's built-in `create-skill` is provided as this package's `pstack-create-skill` skill (draft / validate / test / iterate and description optimization); load it wherever a pstack skill hands off to create-skill.",
+      "- This package's skills are named `pstack-<name>` (except `setup-pstack`); each runs as the short command `/<name>` (`/how` → `pstack-how`). `/skill:<name>` without the prefix is another package's skill, not pstack's.",
       ...mcpInventory(),
     ].join("\n");
   };
@@ -1274,11 +1281,12 @@ export function pstackExtension(pi: ExtensionAPI, options: PstackOptions = {}): 
       }),
     );
     for (const meta of skillMetas) {
-      tryRegister(meta.name, () =>
-        pi.registerCommand(meta.name, {
+      const command = commandName(meta.name);
+      tryRegister(command, () =>
+        pi.registerCommand(command, {
           description: `pstack: run skill ${meta.name}`,
           handler: async (args, cmdCtx) => {
-            const byModel = takeModelDispatch(args.trim() ? `/${meta.name} ${args}` : `/${meta.name}`);
+            const byModel = takeModelDispatch(args.trim() ? `/${command} ${args}` : `/${command}`);
             if (resolveSkillCommand(meta.name) !== meta.name) {
               cmdCtx.ui.notify(`pstack: Pi does not resolve /skill:${meta.name} to this package's skill (is its skills dir loaded?).`, "error");
               return;

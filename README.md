@@ -10,14 +10,16 @@ pi install git:github.com/KorenKrita/pi-pstack
 
 pstack is off until you use it. Two states, both stored in the session and restored per branch (fork, resume, tree navigation):
 
-- **pstack active**: the `Task`, `AskQuestion`, and `pstack_config` tools are enabled, and each turn the system prompt gets a short adapter note (Pi model ids, candidate models, session paths, local-only execution) plus your always-applied pstack rules. It turns on when you run `/skill:<name>` for one of this package's skills (a same-named skill from another package does not count), any pstack skill command below, `/pstack on`, or when the agent `read`s one of this package's `SKILL.md` files. Reading a SKILL.md through `bash` is not detected.
-- **poteto mode**: only via `/poteto-mode` (or `/skill:poteto-mode`). It adds poteto-mode's reminder and an explicit full-autonomy grant every turn. Your explicit instructions, safety constraints, and AGENTS.md permission/destructive-action rules still take precedence. Other pstack skills never turn it on.
+- **pstack active**: the `Task`, `AskQuestion`, and `pstack_config` tools are enabled, and each turn the system prompt gets a short adapter note (Pi model ids, candidate models, session paths, local-only execution) plus your always-applied pstack rules. It turns on when you run `/skill:<name>` for one of this package's skills (`/skill:pstack-how`; a same-named skill from another package does not count), any pstack skill command below, `/pstack on`, or when the agent `read`s one of this package's `SKILL.md` files. Reading a SKILL.md through `bash` is not detected.
+- **poteto mode**: only via `/poteto-mode` (or `/skill:pstack-poteto-mode`). It adds poteto-mode's reminder and an explicit full-autonomy grant every turn. Your explicit instructions, safety constraints, and AGENTS.md permission/destructive-action rules still take precedence. Other pstack skills never turn it on.
+
+**Skill names.** Every skill in this package is named `pstack-<upstream name>` (`pstack-how`, `pstack-tdd`, `pstack-poteto-mode`, …); `setup-pstack` already says pstack and keeps its name. Pi loads only the first skill it finds for a name, so the prefix keeps pstack's `tdd`, `teach`, `bro`, … from shadowing, or being shadowed by, your own skills of the same name. The commands below keep the short upstream names.
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
-| `/<skill-name> [args]` | One per pstack skill (e.g. `/how`, `/arena`, `/setup-pstack`). Activates pstack, then submits exactly what `/skill:<name> [args]` would. Skipped with a warning if the name is already taken. |
+| `/<name> [args]` | One per pstack skill, under its short upstream name (e.g. `/how`, `/arena`, `/tdd`, `/setup-pstack`). Activates pstack, then submits exactly what `/skill:pstack-<name> [args]` would. Skipped with a warning if the name is already taken by another command. |
 | `/poteto-mode [args]` | As above, and enables poteto mode. |
 | `/pstack on` | Activate pstack (not poteto mode). |
 | `/pstack off` | Turn off pstack and poteto mode; removes only this extension's tools from the active set. |

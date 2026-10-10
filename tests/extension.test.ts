@@ -60,8 +60,8 @@ function makePi(opts: FakeOptions = {}) {
   const sent: { text: string; options: unknown }[] = [];
   const notes: { message: string; type?: string }[] = [];
   const skillCommands = opts.skillCommands ?? {
-    how: join(REPO_SKILLS, "how/SKILL.md"),
-    "poteto-mode": join(REPO_SKILLS, "poteto-mode/SKILL.md"),
+    "pstack-how": join(REPO_SKILLS, "pstack-how/SKILL.md"),
+    "pstack-poteto-mode": join(REPO_SKILLS, "pstack-poteto-mode/SKILL.md"),
     "setup-pstack": join(REPO_SKILLS, "setup-pstack/SKILL.md"),
   };
 
@@ -153,7 +153,7 @@ describe("activation (R1)", () => {
     expect(f.active()).toEqual(["read", "bash"]);
     expect(await f.turn()).toEqual({});
 
-    await f.emit("input", { text: "/skill:how explain x", source: "interactive" });
+    await f.emit("input", { text: "/skill:pstack-how explain x", source: "interactive" });
     expect(f.active()).toEqual(["read", "bash", ...OWNED]);
     expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
   });
@@ -161,7 +161,7 @@ describe("activation (R1)", () => {
   test("/skill:poteto-mode enables poteto mode", async () => {
     const f = makePi();
     await f.emit("session_start", { reason: "startup" });
-    await f.emit("input", { text: "/skill:poteto-mode", source: "interactive" });
+    await f.emit("input", { text: "/skill:pstack-poteto-mode", source: "interactive" });
     expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: true });
   });
 
@@ -170,7 +170,7 @@ describe("activation (R1)", () => {
     try {
       const f = makePi();
       await f.emit("session_start", { reason: "startup" });
-      await f.emit("input", { text: "/skill:poteto-mode do the job", source: "interactive" });
+      await f.emit("input", { text: "/skill:pstack-poteto-mode do the job", source: "interactive" });
       expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
       await f.commands.get("poteto-mode").handler("do the job", f.ctx);
       expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
@@ -192,12 +192,30 @@ describe("activation (R1)", () => {
     expect(f.branch).toEqual([]);
   });
 
+  test("namespace: the user's own /skill:tdd stays theirs; pstack's tdd is /skill:pstack-tdd and the /tdd command", async () => {
+    const other = mkdtempSync(join(tmpdir(), "matt-"));
+    mkdirSync(join(other, "tdd"));
+    writeFileSync(join(other, "tdd/SKILL.md"), "---\nname: tdd\ndescription: x\n---\nbody\n");
+    const f = makePi({
+      skillCommands: { tdd: join(other, "tdd/SKILL.md"), "pstack-tdd": join(REPO_SKILLS, "pstack-tdd/SKILL.md") },
+    });
+    await f.emit("session_start", { reason: "startup" });
+    expect(f.commands.has("tdd")).toBe(true);
+    expect(f.commands.has("pstack-tdd")).toBe(false);
+    expect(f.commands.has("setup-pstack")).toBe(true);
+    await f.emit("input", { text: "/skill:tdd", source: "interactive" });
+    expect(f.branch).toEqual([]);
+    await f.commands.get("tdd").handler("x", f.ctx);
+    expect(f.sent.at(-1)?.text).toBe("/skill:pstack-tdd x");
+    expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
+  });
+
   test("symlinked package path: Pi's path and the extension's path resolve to the same realpath", async () => {
     const link = join(mkdtempSync(join(tmpdir(), "pkg-link-")), "skills");
     symlinkSync(realpathSync(REPO_SKILLS), link);
-    const f = makePi({ skillsDir: link, skillCommands: { how: join(REPO_SKILLS, "how/SKILL.md") } });
+    const f = makePi({ skillsDir: link, skillCommands: { "pstack-how": join(REPO_SKILLS, "pstack-how/SKILL.md") } });
     await f.emit("session_start", { reason: "startup" });
-    await f.emit("input", { text: "/skill:how", source: "interactive" });
+    await f.emit("input", { text: "/skill:pstack-how", source: "interactive" });
     expect(stateFromBranch(f.branch).active).toBe(true);
   });
 
@@ -206,15 +224,15 @@ describe("activation (R1)", () => {
     await f.emit("session_start", { reason: "startup" });
     const read = (path: string, isError = false) =>
       f.emit("tool_result", { toolName: "read", input: { path }, content: [], isError });
-    await read(join(REPO_SKILLS, "how/references/explorer-prompt.md"));
+    await read(join(REPO_SKILLS, "pstack-how/references/explorer-prompt.md"));
     await read(join(REPO_SKILLS, "../agents/poteto-agent.md"));
-    await read(join(REPO_SKILLS, "how/SKILL.md"), true);
+    await read(join(REPO_SKILLS, "pstack-how/SKILL.md"), true);
     expect(f.branch).toEqual([]);
 
     const link = join(mkdtempSync(join(tmpdir(), "read-link-")), "s");
     symlinkSync(realpathSync(REPO_SKILLS), link);
     f.ctx.cwd = link;
-    await read("@how/SKILL.md");
+    await read("@pstack-how/SKILL.md");
     expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
   });
 
@@ -235,7 +253,7 @@ describe("activation (R1)", () => {
   test("state follows the branch on session_tree / session_start", async () => {
     const f = makePi();
     await f.emit("session_start", { reason: "startup" });
-    await f.emit("input", { text: "/skill:poteto-mode", source: "interactive" });
+    await f.emit("input", { text: "/skill:pstack-poteto-mode", source: "interactive" });
     expect(f.active()).toContain("Task");
 
     // Navigate to a branch without the entry.
@@ -337,15 +355,15 @@ describe("/pstack and collisions", () => {
     const f = makePi();
     await f.emit("session_start", { reason: "startup" });
     await f.commands.get("how").handler("  where is X  ", f.ctx);
-    expect(f.sent).toEqual([{ text: "/skill:how where is X", options: { expandPromptTemplates: true } }]);
+    expect(f.sent).toEqual([{ text: "/skill:pstack-how where is X", options: { expandPromptTemplates: true } }]);
     expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: false });
     await f.commands.get("poteto-mode").handler("", f.ctx);
-    expect(f.sent.at(-1)?.text).toBe("/skill:poteto-mode");
+    expect(f.sent.at(-1)?.text).toBe("/skill:pstack-poteto-mode");
     expect(stateFromBranch(f.branch)).toEqual({ active: true, poteto: true });
   });
 
   test("skill command refuses when Pi resolves the name to another package", async () => {
-    const f = makePi({ skillCommands: { how: "/elsewhere/how/SKILL.md" } });
+    const f = makePi({ skillCommands: { "pstack-how": "/elsewhere/how/SKILL.md" } });
     await f.emit("session_start", { reason: "startup" });
     await f.commands.get("how").handler("", f.ctx);
     expect(f.sent).toEqual([]);
@@ -367,7 +385,7 @@ describe("per-turn injection (R3)", () => {
     writeRule("bad.mdc", "---\nalwaysApply: [\n---\nbroken\n");
     const f = makePi();
     await f.emit("session_start", { reason: "startup" });
-    await f.emit("input", { text: "/skill:how", source: "interactive" });
+    await f.emit("input", { text: "/skill:pstack-how", source: "interactive" });
     await f.emit("tool_result", { toolName: "edit", input: { path: "src/a.ts" }, content: [], isError: false });
 
     const sections = await f.turn();
@@ -378,7 +396,7 @@ describe("per-turn injection (R3)", () => {
     expect(sections.pstack_rules).toContain("RULE A BODY");
     expect(sections.pstack_rules).not.toContain("NOT ME");
     expect(f.notes.some((n) => n.message.includes("bad.mdc"))).toBe(true);
-    expect(sections.pstack_paths).toContain("skill typescript-best-practices applies");
+    expect(sections.pstack_paths).toContain("skill pstack-typescript-best-practices applies");
 
     const adapter = sections.pstack_adapter as string;
     expect(adapter).toContain("- anthropic/opus (thinking: off, minimal, low, medium, high, xhigh, max)");
@@ -389,10 +407,10 @@ describe("per-turn injection (R3)", () => {
     expect(adapter).toContain('environment: "cloud"');
     expect(adapter).toContain("Bugbot");
     expect(adapter).toContain(`Agent store (Cursor's per-workspace store; orchestrate/, docs/): ${join(home, "projects")}/--`);
-    expect(adapter).toMatch(/bun \S+\/skills\/poteto-mode\/scripts\/orch\/orch\.ts --store/);
+    expect(adapter).toMatch(/bun \S+\/skills\/pstack-poteto-mode\/scripts\/orch\/orch\.ts --store/);
     expect(adapter).toContain("GoalSet/GoalDone");
     expect(adapter).toContain("MCP servers with reachable tools now: none.");
-    expect(adapter).toContain("this package's `create-skill` skill");
+    expect(adapter).toContain("this package's `pstack-create-skill` skill");
 
     // Path hints fire once per session.
     await f.emit("tool_result", { toolName: "read", input: { path: "src/b.ts" }, content: [], isError: false });
@@ -403,7 +421,7 @@ describe("per-turn injection (R3)", () => {
     writeRule("a.mdc", "---\nalwaysApply: true\n---\nRULE A\n");
     const f = makePi();
     await f.emit("session_start", { reason: "startup" });
-    await f.emit("input", { text: "/skill:poteto-mode", source: "interactive" });
+    await f.emit("input", { text: "/skill:pstack-poteto-mode", source: "interactive" });
     const sections = await f.turn();
     expect(Object.keys(sections)).toEqual(["pstack_adapter", "pstack_rules", "pstack_mode"]);
     const mode = sections.pstack_mode as string;
@@ -422,12 +440,12 @@ describe("per-turn injection (R3)", () => {
     };
     const untouched = await request([initial]);
     expect(getCurrentSystemMessage(untouched)?.sections).toEqual(initial.sections);
-    await f.emit("tool_result", { toolName: "read", input: { path: join(REPO_SKILLS, "how/SKILL.md") }, isError: false });
+    await f.emit("tool_result", { toolName: "read", input: { path: join(REPO_SKILLS, "pstack-how/SKILL.md") }, isError: false });
     const activated = await request(untouched);
     expect(getCurrentSystemMessage(activated)?.sections?.pstack_adapter).toContain("pstack skills");
     expect(getCurrentSystemMessage(activated)?.sections?.pstack_rules).toContain("RULE A");
     expect(getCurrentSystemMessage(activated)?.sections?.other).toBe("keep");
-    await f.emit("input", { text: "/skill:poteto-mode" });
+    await f.emit("input", { text: "/skill:pstack-poteto-mode" });
     const poteto = await request(activated);
     expect(getCurrentSystemMessage(poteto)?.sections?.pstack_mode).toContain(POTETO_GRANT);
     await f.commands.get("pstack").handler("off", f.ctx);
@@ -622,11 +640,11 @@ describe("pstack_config (R5) and Task (R7)", () => {
 describe("create-skill (extras)", () => {
   test("the package's create-skill is an own skill: command, activation on read, child --skill", () => {
     const EXTRAS = fileURLToPath(new URL("../extras/skills", import.meta.url));
-    const f = makePi({ extraSkillsDir: EXTRAS, skillCommands: { "create-skill": join(EXTRAS, "create-skill/SKILL.md") } });
+    const f = makePi({ extraSkillsDir: EXTRAS, skillCommands: { "pstack-create-skill": join(EXTRAS, "pstack-create-skill/SKILL.md") } });
     return (async () => {
       await f.emit("session_start", { reason: "startup" });
       expect(f.commands.has("create-skill")).toBe(true);
-      await f.emit("tool_result", { toolName: "read", input: { path: join(EXTRAS, "create-skill/SKILL.md") }, content: [], isError: false });
+      await f.emit("tool_result", { toolName: "read", input: { path: join(EXTRAS, "pstack-create-skill/SKILL.md") }, content: [], isError: false });
       expect(f.branch.filter((e: any) => e.customType === "pstack-state").at(-1)?.data).toEqual({ active: true, poteto: false });
     })();
   });

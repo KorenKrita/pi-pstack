@@ -1,7 +1,7 @@
 // Validate the generated skills/ and agents/ trees. Exit 1 on any finding.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { CURSOR_ALLOWLIST, EXTERNAL_SKILLS, isBinary, isValidSkillName, stripUrls } from "./rules";
+import { CURSOR_ALLOWLIST, EXTERNAL_SKILLS, isBinary, isValidSkillName, pstackName, stripUrls } from "./rules";
 
 export type Finding = { file: string; message: string };
 
@@ -49,19 +49,20 @@ const BOLD_LIST = new RegExp(`${BOLD}((?:${JOIN}${BOLD_NC})*)\\s+(principle\\s+s
 
 /**
  * Skill references in prose: bold names (or bold lists) followed by skill/principle, any
- * `**principle-x**`, `Use **x** for|whenever|when|to`, and `/x` slash commands (bare, backticked,
- * parenthesised, or quoted; `/x/...` paths are not commands).
+ * `**principle-x**` / `**pstack-principle-x**`, `Use **x** for|whenever|when|to`, and `/x` slash commands (bare,
+ * backticked, parenthesised, or quoted; `/x/...` paths are not commands). The short `**x** principle` form names
+ * `pstack-principle-x`. Slash commands come back as `/x`: they use the short command name, not the skill name.
  */
 export function findSkillRefs(text: string): string[] {
   const refs = new Set<string>();
   for (const m of text.matchAll(BOLD_LIST)) {
     const names = [m[1]!, ...[...m[2]!.matchAll(new RegExp(BOLD, "g"))].map((x) => x[1]!)];
     const principle = m[3]!.startsWith("principle");
-    for (const n of names) refs.add(principle && !n.startsWith("principle-") ? `principle-${n}` : n);
+    for (const n of names) refs.add(principle && !/^(pstack-)?principle-/.test(n) ? `pstack-principle-${n}` : n);
   }
-  for (const m of text.matchAll(/\*\*(principle-[a-z0-9-]+)\*\*/g)) refs.add(m[1]!);
+  for (const m of text.matchAll(/\*\*((?:pstack-)?principle-[a-z0-9-]+)\*\*/g)) refs.add(m[1]!);
   for (const m of text.matchAll(/\b[Uu]se \*\*([a-z0-9-]+)\*\* (?:for|whenever|when|to)\b/g)) refs.add(m[1]!);
-  for (const m of text.matchAll(/(?<=^|[\s(`"'])\/([a-z][a-z0-9-]+)(?=[\s`"'),.:;]|$)/gm)) refs.add(m[1]!);
+  for (const m of text.matchAll(/(?<=^|[\s(`"'])\/([a-z][a-z0-9-]+)(?=[\s`"'),.:;]|$)/gm)) refs.add(`/${m[1]!}`);
   return [...refs];
 }
 
@@ -69,9 +70,15 @@ export function findSkillRefs(text: string): string[] {
 // (e.g. "keep the harness in `/tmp`", "`/skill:<name>`", "`/reload`").
 const SLASH_NOISE = new Set(["tmp", "skill", "reload"]);
 
+/** `known`: skill names on disk (pstack-x, setup-pstack). A `/x` command resolves to the skill it runs. */
 export function checkSkillRefs(file: string, text: string, known: Set<string>): Finding[] {
+  const resolves = (r: string) => {
+    if (!r.startsWith("/")) return known.has(r) || r in EXTERNAL_SKILLS;
+    const short = r.slice(1);
+    return known.has(pstackName(short)) || short in EXTERNAL_SKILLS || SLASH_NOISE.has(short);
+  };
   return findSkillRefs(stripUrls(text))
-    .filter((r) => !known.has(r) && !(r in EXTERNAL_SKILLS) && !SLASH_NOISE.has(r))
+    .filter((r) => !resolves(r))
     .map((r) => ({ file, message: `unresolved skill reference: ${r}` }));
 }
 

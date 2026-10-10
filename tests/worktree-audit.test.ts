@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const SCRIPT = join(import.meta.dir, "../skills/poteto-mode/scripts/worktree-audit.sh");
+const SCRIPT = join(import.meta.dir, "../skills/pstack-poteto-mode/scripts/worktree-audit.sh");
 const slug = (p: string) => `--${p.replace(/^\//, "").replace(/[/:]/g, "-")}--`;
 
 async function audit(sessionCwd: "main" | "wt" | null) {

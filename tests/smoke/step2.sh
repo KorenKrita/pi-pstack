@@ -38,7 +38,7 @@ ROLES_JSON=$(jq -nc --arg m "$MODEL" '{
 F="$OUT/session.jsonl"
 pi_json \
 	"Reply with just OK." \
-	'/skill:how Ignore the skill steps. Call the Task tool exactly once with description "smoke" and prompt "noop". Then reply DONE.' \
+	'/skill:pstack-how Ignore the skill steps. Call the Task tool exactly once with description "smoke" and prompt "noop". Then reply DONE.' \
 	"Call the pstack_config tool exactly once with action \"write\", budget \"unlimited\", and roles exactly this JSON object: $ROLES_JSON . Then reply DONE." \
 	'Call the Task tool exactly once with description "smoke" and prompt "noop" and model "nosuch/model-x". Then reply DONE.' \
 	>"$F" 2>"$OUT/stderr.log"
@@ -51,8 +51,8 @@ ENDS='[.[] | select(.type=="tool_execution_end")]'
 
 check "no pstack tools before activation (first system message)" \
 	"($SETS | .[0]) as \$s | ($OWN | all(. as \$t | \$s | index(\$t) | not))" "$F"
-# Tool set in effect when the /skill:how turn's Task call ran: the last system message before that call.
-check "pstack tools present for the /skill:how turn (before its Task call)" \
+# Tool set in effect when the /skill:pstack-how turn's Task call ran: the last system message before that call.
+check "pstack tools present for the /skill:pstack-how turn (before its Task call)" \
 	"([.[] | select((.type==\"message_start\" and .message.role==\"system\") or (.type==\"tool_execution_start\" and .toolName==\"Task\"))]
 	  | (map(.type==\"tool_execution_start\") | index(true)) as \$i | .[:\$i] | map(.message)
 	  | reduce .[] as \$m ([]; (. + [\$m.toolsAdded[]?.name]) - [\$m.toolsRemoved[]? | if type==\"string\" then . else .name end]))

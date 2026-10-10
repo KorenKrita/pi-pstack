@@ -306,7 +306,7 @@ export const RULES: Rule[] = [
 /** Bare `.cursor/` references that intentionally survive adaptation. `file` is an output path. */
 export const CURSOR_ALLOWLIST: { file: string; text: string; reason: string }[] = [
   {
-    file: "skills/poteto-mode/playbooks/worktree-cleanup.md",
+    file: "skills/pstack-poteto-mode/playbooks/worktree-cleanup.md",
     text: ".cursor/worktrees/myrepo/x",
     reason:
       "Illustrative example of a worktree living outside the hand-typed `<repo>-worktrees/` guess; the lesson (read `git worktree list`) holds regardless of tool.",
@@ -315,7 +315,6 @@ export const CURSOR_ALLOWLIST: { file: string; text: string; reason: string }[] 
 
 /** Skill names referenced in prose that are not vendored here but are expected to exist. */
 export const EXTERNAL_SKILLS: Record<string, string> = {
-  "create-skill": "Cursor built-in skill-authoring skill; pi-pstack ships its own in extras/skills/create-skill.",
   babysit: "Cursor built-in PR babysit skill; poteto-mode explicitly routes away from it.",
   loop: "Cursor `/loop` built-in command; the extension must provide it.",
   goal: "Cursor `/goal` built-in command; the extension must provide it.",
@@ -385,4 +384,47 @@ export function normalizeSkillName(name: string): string {
 
 export function isValidSkillName(name: string): boolean {
   return name.length > 0 && name.length <= 64 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(name);
+}
+
+/** This package's skill names carry a `pstack-` prefix so they never shadow (or get shadowed by) a user's skill
+ * of the same short name; a name that already says pstack keeps it. Slash commands keep the short name. */
+export function pstackName(name: string): string {
+  return name.includes("pstack") ? name : `pstack-${name}`;
+}
+
+/** Backticked names that are prose words or scopes there, not skill references. */
+const NAMESPACE_KEEP = ["`candidate`, or `arena`", "`pstack` or `poteto-mode`", "`why` question"];
+
+/**
+ * Rewrite references to this package's skills (`names`, unprefixed upstream names) to their pstack- names:
+ * `**x**`, `` `x` `` / `` `x`'s ``, `/skill:x`, and relative links `../x/`. Slash commands (`/x`), other words,
+ * `pstack/skills/x/` upstream-repo paths and URLs stay. Hits are counted under `skill-namespace`.
+ */
+export function namespaceSkills(text: string, names: Set<string>, hits: Record<string, number> = {}): string {
+  const rename = (n: string) => (names.has(n) ? pstackName(n) : n);
+  let count = 0;
+  const sub = (re: RegExp, seg: string) =>
+    seg.replace(re, (whole: string, pre: string, name: string, post: string) => {
+      const next = rename(name);
+      if (next === name) return whole;
+      count++;
+      return pre + next + post;
+    });
+  const out = splitUrls(text)
+    .map(([seg, isUrl]) => {
+      if (isUrl) return seg;
+      const kept: string[] = [];
+      let s = seg.replace(new RegExp(NAMESPACE_KEEP.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g"), (k) => {
+        kept.push(k);
+        return `\0${kept.length - 1}\0`;
+      });
+      s = sub(/(\*\*)([a-z0-9-]+)(\*\*)/g, s);
+      s = sub(/(`)([a-z0-9-]+)(`)/g, s);
+      s = sub(/(\/skill:)([a-z0-9-]+)()/g, s);
+      s = sub(/((?:\.\.\/)+)([a-z0-9-]+)(\/)/g, s);
+      return s.replace(/\0(\d+)\0/g, (_, i: string) => kept[Number(i)]!);
+    })
+    .join("");
+  hits["skill-namespace"] = (hits["skill-namespace"] ?? 0) + count;
+  return out;
 }

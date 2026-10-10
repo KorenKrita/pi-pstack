@@ -43,7 +43,7 @@ describe("skill frontmatter (R3c/d)", () => {
   const read = (n: string) => parseSkillMeta(readFileSync(join(skills, n, "SKILL.md"), "utf8"), n);
 
   test("poteto-mode is a mode skill with a reminder", () => {
-    const m = read("poteto-mode");
+    const m = read("pstack-poteto-mode");
     expect(m.mode).toBe(true);
     expect(m.disableModelInvocation).toBe(true);
     expect(m.reminder).toStartWith("New task?");
@@ -51,14 +51,14 @@ describe("skill frontmatter (R3c/d)", () => {
   });
 
   test("typescript-best-practices has paths globs", () => {
-    const m = read("typescript-best-practices");
+    const m = read("pstack-typescript-best-practices");
     expect(m.mode).toBe(false);
     expect(m.paths).toEqual(["**/*.ts", "**/*.tsx"]);
   });
 
   test("ordinary skill: no mode, no reminder", () => {
-    const m = read("how");
-    expect(m).toMatchObject({ name: "how", mode: false, paths: [] });
+    const m = read("pstack-how");
+    expect(m).toMatchObject({ name: "pstack-how", mode: false, paths: [] });
     expect(m.reminder).toBeUndefined();
   });
 

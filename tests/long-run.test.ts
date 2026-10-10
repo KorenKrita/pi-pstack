@@ -48,7 +48,7 @@ function host() {
     getActiveTools: () => [...active],
     setActiveTools: (n: string[]) => (active = [...n]),
     // Pi's skill commands for this package's skills (registerCommands skips names already taken, so only skill: entries).
-    getCommands: () => [{ name: "skill:poteto-mode", source: "skill", sourceInfo: { path: join(SKILLS, "poteto-mode", "SKILL.md") } }],
+    getCommands: () => [{ name: "skill:pstack-poteto-mode", source: "skill", sourceInfo: { path: join(SKILLS, "pstack-poteto-mode", "SKILL.md") } }],
     appendEntry: (customType: string, data: unknown) => branch.push({ type: "custom", customType, data }),
     // Like Pi's prompt(): extension commands run first (asynchronously), else the text is a message.
     sendUserMessage: (text: string, options: any) => {
@@ -320,6 +320,7 @@ describe("step 4 review fixes", () => {
     await h.command("pstack", "on");
     await expect(h.call("LoopStart", { prompt: "/poteto-mode go", intervalSeconds: 30 })).rejects.toThrow(/only by the user/);
     await expect(h.call("LoopStart", { prompt: "  /skill:poteto-mode" })).rejects.toThrow(/only by the user/);
+    await expect(h.call("LoopStart", { prompt: "/skill:pstack-poteto-mode go" })).rejects.toThrow(/only by the user/);
     expect(h.branch.filter((e) => e.customType === "pstack-loop")).toHaveLength(0);
     expect(h.branch.filter((e) => e.customType === "pstack-state").at(-1).data.poteto).toBe(false);
   });
@@ -444,9 +445,9 @@ describe("poteto grant provenance (review #1 root cause)", () => {
     await h.emit("session_start", { reason: "startup" });
     await h.command("pstack", "on");
     // Bypass the LoopStart prefix check: arm via a nested user-less /loop with a skill form.
-    await h.call("LoopStart", { prompt: "/loop 1h /skill:poteto-mode", intervalSeconds: 3600 });
+    await h.call("LoopStart", { prompt: "/loop 1h /skill:pstack-poteto-mode", intervalSeconds: 3600 });
     await settleMicro();
-    await h.emit("input", { text: "/skill:poteto-mode", source: "extension" });
+    await h.emit("input", { text: "/skill:pstack-poteto-mode", source: "extension" });
     expect(potetoOn(h)).toBe(false);
     await h.call("LoopStop", { loopId: "all" });
   });
@@ -454,7 +455,7 @@ describe("poteto grant provenance (review #1 root cause)", () => {
   test("the user's own /poteto-mode and /skill:poteto-mode still grant", async () => {
     const h = host();
     await h.emit("session_start", { reason: "startup" });
-    await h.emit("input", { text: "/skill:poteto-mode", source: "interactive" });
+    await h.emit("input", { text: "/skill:pstack-poteto-mode", source: "interactive" });
     expect(potetoOn(h)).toBe(true);
     const h2 = host();
     await h2.emit("session_start", { reason: "startup" });
@@ -470,7 +471,7 @@ describe("poteto grant provenance (review #1 root cause)", () => {
     await h.call("LoopStart", { prompt: "/loop 1h /poteto-mode now", intervalSeconds: 3600 });
     await settleMicro();
     expect(h.sentUser.map((s) => s.text)).toContain("/poteto-mode now");
-    expect(h.sentUser.map((s) => s.text)).toContain("/skill:poteto-mode now");
+    expect(h.sentUser.map((s) => s.text)).toContain("/skill:pstack-poteto-mode now");
     expect(potetoOn(h)).toBe(false);
     expect(h.branch.filter((e) => e.customType === "pstack-loop" && e.data.op === "add").every((e) => e.data.loop.byModel)).toBe(true);
     await h.call("LoopStop", { loopId: "all" });
